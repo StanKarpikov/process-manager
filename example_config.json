@@ -1,7 +1,7 @@
 {
-    "default_data_folder": "../examples/peripheral_service/default_data/",
-    "database_path": "../examples/peripheral_service/parameters.db",
-    "saved_database_path": "../examples/peripheral_service/saved_parameters.db",
+    "default_data_folder": "default_data/",
+    "database_path": "parameters.db",
+    "saved_database_path": "saved_parameters.db",
     "services": [
         {
           "name": "detector",

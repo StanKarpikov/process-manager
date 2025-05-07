@@ -31,6 +31,29 @@ struct AppState {
     config: Config,
 }
 
+fn run_command(command: &str, args: &[&str]) {
+    let output = Command::new(command)
+        .args(args)
+        .output(); // Capture both stdout and stderr
+    match output {
+        Ok(o) => {
+            if !o.stdout.is_empty() {
+                info!("stdout: {}", String::from_utf8_lossy(&o.stdout).trim());
+            }
+            if !o.stderr.is_empty() {
+                error!("stderr: {}", String::from_utf8_lossy(&o.stderr).trim());
+            }
+
+            if !o.status.success() {
+                error!("Command failed with status: {}", o.status);
+            }
+        },
+        Err(e) => {
+            error!("Error executing command: {}", e);
+        }
+    };
+}
+
 fn process_callback(state: &AppState, id: ParameterId)
 {
     let name = state.interface.get_name(id);
@@ -59,12 +82,18 @@ fn process_callback(state: &AppState, id: ParameterId)
 async fn main() {
     env_logger::Builder::from_env(Env::default().default_filter_or("info"))
     .format(|buf, record| {
+        let file_name = record.file().unwrap_or("unknown");
+        let file_name = std::path::Path::new(file_name)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+
         writeln!(
             buf,
             "{} [{}] {}:{} - {}",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
             record.level(),
-            record.file().unwrap_or("unknown"),
+            file_name,
             record.line().unwrap_or(0),
             record.args()
         )
@@ -74,7 +103,13 @@ async fn main() {
     let args = Args::parse();
     let config = Config::from_file(args.config);
 
-    let mut interface_instance = InterfaceInstance::new(&config.database_path, &config.saved_database_path, &config.default_data_folder).unwrap();
+    let mut interface_instance = match InterfaceInstance::new(&config.database_path, &config.saved_database_path, &config.default_data_folder) {
+        Ok(instance) => instance,
+        Err(e) => {
+            eprintln!("Failed to create interface instance: {}", e);
+            return;
+        }
+    };
 
     let (tx, rx) = std::sync::mpsc::channel::<ServiceCommand>();
     
@@ -115,7 +150,7 @@ async fn main() {
                             }
                         },
                         _ => {
-                            error!("Unexpected type for {}", service.parameter);
+                            error!("Unexpected type for {}: {}", service.parameter, enabled);
                             return;
                         }
                     };
@@ -134,22 +169,19 @@ async fn main() {
             match cmd {
                 ServiceCommand::Start(name) => {
                     info!("Start {}", name);
-                    let service = services_clone.iter().find(|x|x.name == name);
+                    let service = services_clone.iter().find(|&x|x.parameter == name);
                     if let Some(config) = service {
                         match config.manager {
                             Manager::Systemd => {
-                                let _ = Command::new("systemctl")
-                                    .arg("start")
-                                    .arg(&config.name)
-                                    .status();
+                                run_command("systemctl", &["start", &config.name]);
                             }
                             Manager::Runit => {
-                                let _ = Command::new("sv")
-                                    .arg("up")
-                                    .arg(format!("/etc/service/{}", &config.name))
-                                    .status();
+                                run_command("sv", &["up", &config.name]);
                             }
                         }
+                    }
+                    else {
+                        error!("Could not find service description for {name}");
                     }
                 },
                 ServiceCommand::Stop(name) => {
@@ -158,18 +190,15 @@ async fn main() {
                     if let Some(config) = service {
                         match config.manager {
                             Manager::Systemd => {
-                                let _ = Command::new("systemctl")
-                                    .arg("stop")
-                                    .arg(&config.name)
-                                    .status();
+                                run_command("systemctl", &["stop", &config.name]);
                             }
                             Manager::Runit => {
-                                let _ = Command::new("sv")
-                                    .arg("down")
-                                    .arg(format!("/etc/service/{}", &config.name))
-                                    .status();
+                                run_command("sv", &["down", &config.name]);
                             }
                         }
+                    }
+                    else {
+                        error!("Could not find service description for {name}");
                     }
                 }
             }
