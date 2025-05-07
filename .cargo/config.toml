@@ -1,0 +1,2 @@
+[env]
+PARAMETERS_PROTO_PATH = { value = "example", relative = true, force = false }

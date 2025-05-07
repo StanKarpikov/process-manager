@@ -1,0 +1,15 @@
+[package]
+name = "process_manager"
+version = "0.1.0"
+edition = "2024"
+authors = [ "Stanislav Karpikov <stankarpikov@gmail.com>" ]
+
+[dependencies]
+log = "0.4.27"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+chrono = "0.4.41"
+env_logger = "0.11.8"
+clap = { version = "4.4", features = ["derive", "cargo"] }
+econfmanager = { git = "https://github.com/StanKarpikov/econfmanager", version = "0.1.3" }

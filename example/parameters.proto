@@ -1,0 +1,21 @@
+syntax = "proto3";
+package parameters;
+
+import "options.proto";
+
+option (options.version) = 1;
+
+message Services {
+    bool detector = 1 [(options.title) = "Detector",
+                       (options.default_value) = { val_bool: true },
+                       (options.comment) = "Enabled Detector Service"];
+
+    bool exporter = 2 [(options.title) = "Exporter",
+                       (options.default_value) = { val_bool: true },
+                       (options.comment) = "Enabled Exporter Service"];
+}
+
+message Configuration {
+    Services services = 1 [(options.title) = "Services",
+                           (options.comment) = "Manages Running Services and Tasks"];
+}

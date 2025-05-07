@@ -1,0 +1,17 @@
+{
+    "default_data_folder": "../examples/peripheral_service/default_data/",
+    "database_path": "../examples/peripheral_service/parameters.db",
+    "saved_database_path": "../examples/peripheral_service/saved_parameters.db",
+    "services": [
+        {
+          "name": "detector",
+          "parameter": "services@detector",
+          "manager": "systemd"
+        },
+        {
+          "name": "exporter",
+          "parameter": "services@exporter",
+          "manager": "systemd"
+        }
+      ]
+}
