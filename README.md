@@ -1,2 +1,3 @@
-# process-manager
-Simple Process Manager that Supports Systemd or Runit, Controlled via Econfmanager
+# Process Manager
+
+Simple Process Manager controlled via Econfmanager.
