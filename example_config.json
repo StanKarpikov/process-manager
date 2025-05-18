@@ -1,17 +1,23 @@
 {
-    "default_data_folder": "default_data/",
-    "database_path": "parameters.db",
-    "saved_database_path": "saved_parameters.db",
-    "services": [
-        {
-          "name": "detector",
-          "parameter": "services@detector",
-          "manager": "systemd"
-        },
-        {
-          "name": "exporter",
-          "parameter": "services@exporter",
-          "manager": "systemd"
-        }
-      ]
+  "default_data_folder": "default_data/",
+  "database_path": "parameters.db",
+  "saved_database_path": "saved_parameters.db",
+  "services": [
+    {
+      "name": "simulator",
+      "enable": {
+        "image_generator@source": 1
+      },
+      "env": {
+        "WIDTH": "image_generator@width",
+        "HEIGHT": "image_generator@height"
+      },
+      "command": "./simulator --width=$WIDTH --height=$HEIGHT --config=$CONFIG",
+      "watchdog": "stdout"
+    },
+    {
+      "name": "processor",
+      "command": "./processor"
+    }
+  ]
 }

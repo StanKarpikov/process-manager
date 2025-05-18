@@ -1,22 +1,24 @@
-use std::fs;
+use std::{collections::HashMap, fs};
 use serde::Deserialize;
 
 /******************************************************************************
  * PUBLIC TYPES
  ******************************************************************************/
 
-#[derive(Debug, Deserialize, Clone)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum Manager {
-    Systemd,
-    Runit,
-}
-
-#[derive(Debug, Deserialize, Clone)]
+ #[derive(Debug, Clone, Deserialize)]
+ #[serde(tag = "type")]
+ pub(crate) enum Watchdog {
+     Stdout,
+     None,
+ }
+ 
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ServiceConfig {
     pub name: String,
-    pub parameter: String,
-    pub manager: Manager,
+    pub enable: HashMap<String, serde_json::Value>,
+    pub env: Option<HashMap<String, String>>, 
+    pub command: String,
+    pub watchdog: Watchdog,
 }
 
 #[derive(Deserialize, Default)]
