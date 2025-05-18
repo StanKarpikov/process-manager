@@ -1,6 +1,7 @@
 syntax = "proto3";
 package parameters;
 
+import "custom_types.proto";
 import "options.proto";
 
 option (options.version) = 1;

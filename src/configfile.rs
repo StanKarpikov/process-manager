@@ -15,10 +15,19 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ServiceConfig {
     pub name: String,
+
+    #[serde(default = "default_enable")]
     pub enable: HashMap<String, serde_json::Value>,
+
+    #[serde(default = "default_env")]
     pub env: Option<HashMap<String, String>>, 
+
     pub command: String,
+
+    #[serde(default = "default_watchdog")]
     pub watchdog: Watchdog,
+
+    pub log_dir: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -36,6 +45,18 @@ pub(crate) struct Config {
 /******************************************************************************
  * PRIVATE FUNCTIONS
  ******************************************************************************/
+
+fn default_enable() -> HashMap<String, serde_json::Value> {
+    HashMap::new()
+}
+
+fn default_env() -> Option<HashMap<String, String>> {
+    None
+}
+
+fn default_watchdog() -> Watchdog {
+    Watchdog::None
+}
 
 fn default_database_path() -> String {
     "configuration.db".to_string()
