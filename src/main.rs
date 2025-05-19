@@ -13,15 +13,13 @@ use econfmanager::interface::ParameterUpdateCallback;
 use env_logger::Env;
 use log::{error, info, warn};
 use std::io::Write;
-use nix::sys::signal::{self, Signal};
-use nix::unistd::Pid;
 use configfile::{Config, ServiceConfig, Watchdog};
 
 pub mod arguments;
 pub mod configfile;
+pub mod process_management;
 
 const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60);
-const TERMINATE_TIMEOUT: Duration = Duration::from_secs(5);
 const PERIODIC_UPDATE_INTERVAL: Duration = Duration::from_millis(5000);
 
 #[derive(Debug)]
@@ -75,65 +73,17 @@ fn run_command(name: &String,
     }
 }
 
-fn terminate_process(name: &String, pid: i32, force: bool) {
-    let signal = if force { Signal::SIGKILL } else { Signal::SIGTERM };
-    if let Err(e) = signal::kill(Pid::from_raw(pid), signal) {
-        error!("[{name}] Failed to send signal to process {pid}: {e}");
-    }
-}
-
 async fn stop_process(processes: Arc<Mutex<HashMap<String, ProcessInfo>>>, name: String) {
     let mut processes = processes.lock().unwrap();
     if let Some(process_info) = processes.get_mut(&name) {
         if let Some(child) = &mut process_info.child {
             let pid = child.id() as i32;
-            
-            // Send SIGTERM first
-            terminate_process(&name, pid, false);
-            
-            // Wait for the process to terminate
-            let start = Instant::now();
-            while start.elapsed() < TERMINATE_TIMEOUT {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        info!("[{name}] Process exited with status {status}");
-                        break;
-                    }
-                    Ok(None) => {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
-                    }
-                    Err(e) => {
-                        error!("[{name}] Error waiting for process: {e}");
-                        break;
-                    }
-                }
-            }
-            
-            // If still running, send SIGKILL
-            if let Ok(None) = child.try_wait() {
-                warn!("[{name}] Process didn't terminate, sending SIGKILL");
-                terminate_process(&name, pid, true);
-            }
+            let _ = process_management::stop_process(Some(pid), name);
         }
         
         // Remove the process from tracking
         process_info.child = None;
     }
-}
-
-fn expand_command(command: &str, env_vars: &HashMap<String, String>) -> String {
-    let mut expanded = command.to_string();
-    
-    // Replace all occurrences of $VAR or ${VAR} with their values
-    for (key, value) in env_vars {
-        // Handle $VAR format
-        expanded = expanded.replace(&format!("${}", key), value);
-        // Handle ${VAR} format
-        expanded = expanded.replace(&format!("${{{}}}", key), value);
-    }
-    
-    expanded
 }
 
 async fn start_process(
@@ -147,7 +97,7 @@ async fn start_process(
     let mut env_vars = HashMap::new();
     for (key, value) in std::env::vars() {
         env_vars.insert(key, value);
-    }    
+    }
     
     if let Some(env_config) = &service_config.env {
         for (env_var, param_name) in env_config {
@@ -160,6 +110,8 @@ async fn start_process(
             }
         }
     }
+
+    env_vars.insert("PROCESS_MANAGER_UUID".to_string(), name.to_string());
     
     if only_if_env_changed{
         let mut processes = processes.lock().unwrap();
@@ -183,8 +135,7 @@ async fn start_process(
 
     stop_process(processes.clone(), name.clone()).await;
     
-    let command = expand_command(&service_config.command, &env_vars);
-    let mut child = match run_command(&name, &command, &env_vars, &service_config.log_dir) {
+    let mut child = match run_command(&name, &service_config.command, &env_vars, &service_config.log_dir) {
         Some(c) => c,
         None => {
             error!("[{}] Failed to run the process", name);
@@ -488,7 +439,6 @@ async fn main() {
                 info!("[{}] Restart received, restarting...", name);
                 if let Some(service_config) = services.iter().find(|&s|s.name == *name) {
                     let interface = &state.lock().unwrap().interface;
-                    stop_process(processes.clone(), name.clone()).await;
                     start_process(
                         processes.clone(),
                         name,
