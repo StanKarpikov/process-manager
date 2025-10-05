@@ -15,10 +15,6 @@ chrono = "0.4.41"
 sysinfo = "0.29"
 env_logger = { version = "0.11.8" }
 clap = { version = "4.4", features = ["derive", "cargo"] }
-econfmanager = { git = "https://github.com/StanKarpikov/econfmanager.git", branch = "main" }
+econfmanager = { git = "https://github.com/StanKarpikov/econfmanager.git", branch = "feature/yaml-config" }
 serde_yaml = "0.9.34"
 num_cpus = "1.17.0"
-
-[patch.crates-io]
-# Use a local path instead of Git, when embedded into other projects
-econfmanager = { path = "../../components/econfmanager/econfmanager" }
