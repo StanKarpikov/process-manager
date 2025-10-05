@@ -66,11 +66,12 @@ fn stop_process_by_env_var(name: &str) -> Result<(), String> {
         // Parse environment variables
         let env_vars = String::from_utf8_lossy(&environ);
         for var in env_vars.split('\0') {
-            if let Some((key, value)) = var.split_once('=') 
-                && key == "PROCESS_MANAGER_ID" && value == name {
+            if let Some((key, value)) = var.split_once('=') {
+                if key == "PROCESS_MANAGER_ID" && value == name {
                     // Found matching process, stop it
                     return stop_process_by_pid(pid);
                 }
+            }
         }
     }
 

@@ -238,11 +238,16 @@ async fn start_process(
     //   env: { FOO: some_param_name }   # sets FOO to the value of parameter "some_param_name"
     if let Some(env_config) = &service_config.env {
         for (env_var, env_value) in env_config {
-            if let Some(param_id) = interface.get_parameter_id_from_name(env_value.clone())
-                && let Ok(value) = interface.get(param_id, false) {
+            if let Some(param_id) = interface.get_parameter_id_from_name(env_value.clone()) {
+                if let Ok(value) = interface.get(param_id, false) {
                     let value_str = InterfaceInstance::value_to_string(&value);
                     process_info!(name.clone(), "Adding env value {env_var} = {value_str} (from parameter {})", env_value);
                     env_vars.insert(env_var.clone(), value_str);
+                } else {
+                    // Use as literal value
+                    process_info!(name.clone(), "Adding env value {env_var} = {env_value} (literal)");
+                    env_vars.insert(env_var.clone(), env_value.clone());
+                }
             } else {
                 // Use as literal value
                 process_info!(name.clone(), "Adding env value {env_var} = {env_value} (literal)");
@@ -255,21 +260,23 @@ async fn start_process(
 
     if only_if_env_changed {
         let mut processes = processes.lock().unwrap();
-        if let Some(process_info) = processes.get_mut(&name)
-            && process_info.env_vars == env_vars {
+        if let Some(process_info) = processes.get_mut(&name) {
+            if process_info.env_vars == env_vars {
                 process_info!(name, "Env unchanged, skip restart");
                 return;
             }
+        }
     }
 
     if !restart {
         let mut processes = processes.lock().unwrap();
-        if let Some(process_info) = processes.get_mut(&name) 
-            && let Some(_) = &mut process_info.child {
+        if let Some(process_info) = processes.get_mut(&name) {
+            if process_info.child.is_some() {
                 process_info!(name, "Already running");
                 return;
             }
         }
+    }
 
     stop_process(processes.clone(), name.clone()).await;
 
@@ -388,9 +395,9 @@ fn process_callback(state: &mut AppState, id: ParameterId) {
                 requested_state_change = true;
             }
 
-            if !requested_state_change
-                && let Some(env_config) = &service_config.env
-                    && env_config.values().any(|param_name| param_name == &name) {
+            if !requested_state_change {
+                if let Some(env_config) = &service_config.env {
+                    if env_config.values().any(|param_name| param_name == &name) {
                         process_info!(service_name, 
                             "{name} parameter changed in env, restarting"
                         );
@@ -398,6 +405,8 @@ fn process_callback(state: &mut AppState, id: ParameterId) {
                             .tx
                             .send(ServiceCommand::Restart(service_name.clone()));
                     }
+                }
+            }
         }
     }
 }
@@ -434,12 +443,13 @@ async fn watchdog_task(
                     process_info.died_at = Some(now);
                     process_info.child = None;
                 }
-            } else if let Some(died_at) = process_info.died_at
-                && now.duration_since(died_at) >= Duration::from_secs(5) {
+            } else if let Some(died_at) = process_info.died_at {
+                if now.duration_since(died_at) >= Duration::from_secs(5) {
                     process_warn!(name, "Restarting process");
                     let _ = tx.send(ServiceCommand::Start(name.clone()));
                     process_info.died_at = None;
                 }
+            }
         }
     }
 }
