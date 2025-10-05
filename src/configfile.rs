@@ -19,7 +19,7 @@ pub(crate) enum CpuSelection {
      None,
  }
  
-#[derive(Debug, Clone, Deserialize)]
+    #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ServiceConfig {
     #[serde(default = "default_enable")]
     pub enable: HashMap<String, serde_json::Value>,
@@ -42,6 +42,9 @@ pub(crate) struct ServiceConfig {
 
     #[serde(default)]
     pub cpu_limit: Option<u32>,
+
+    #[serde(default = "default_workdir")]
+    pub workdir: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -64,16 +67,20 @@ pub(crate) struct Config {
  * PRIVATE FUNCTIONS
  ******************************************************************************/
 
-fn default_enable() -> HashMap<String, serde_json::Value> {
-    HashMap::new()
-}
+    fn default_enable() -> HashMap<String, serde_json::Value> {
+        HashMap::new()
+    }
 
-fn default_env() -> Option<HashMap<String, String>> {
+    fn default_env() -> Option<HashMap<String, String>> {
     None
 }
 
 fn default_watchdog_timeout_s() -> u64 {
     60
+}
+
+fn default_workdir() -> String {
+    ".".to_string()  // Add a default value for the new "workdir" parameter
 }
 
 fn default_watchdog() -> Watchdog {
@@ -96,14 +103,14 @@ fn default_default_data_folder() -> String {
  * PUBLIC FUNCTIONS
  ******************************************************************************/
 
-impl Config {
-    pub fn from_file(config_file: String) -> Config {
-        let file_content = fs::read_to_string(std::path::Path::new(&config_file))
-            .unwrap_or_else(|_| panic!("Failed to read configuration file {}", config_file));
+    impl Config {
+        pub fn from_file(config_file: String) -> Config {
+            let file_content = fs::read_to_string(std::path::Path::new(&config_file))
+                .unwrap_or_else(|_| panic!("Failed to read configuration file {}", config_file));
 
-        let yaml_config: Config = serde_yaml::from_str(&file_content)
-            .expect("Failed to parse YAML configuration");
+            let yaml_config: Config = serde_yaml::from_str(&file_content)
+                .expect("Failed to parse YAML configuration");
 
-        yaml_config
+            yaml_config
+        }
     }
-}

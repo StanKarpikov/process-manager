@@ -150,6 +150,7 @@ fn run_command(
     log_dir: &String,
     cpu: Option<&CpuSelection>,
     cpu_limit: Option<u32>,
+    workdir: &String,
 ) -> Option<Child> {
     // Remove lock files using Rust's file removal implementation before starting the main process
     let lock_path1 = Path::new(log_dir).join(".lock");
@@ -188,7 +189,7 @@ fn run_command(
     if let Some(cpu_limit) = cpu_limit {
         shell_command = create_cpu_limit_command(cpu_limit, &shell_command);
     }
-    cmd.arg("-c").arg(&shell_command).envs(env_vars);
+    cmd.arg("-c").arg(&shell_command).envs(env_vars).current_dir(workdir);
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -287,6 +288,7 @@ async fn start_process(
         &service_config.log_dir,
         service_config.cpu.as_ref(),
         service_config.cpu_limit,
+        &service_config.workdir,
     ) {
         Some(c) => c,
         None => {
