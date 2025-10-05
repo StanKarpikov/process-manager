@@ -30,7 +30,7 @@ fn stop_process_by_pid(pid: i32) -> Result<(), String> {
     thread::sleep(TERMINATE_TIMEOUT);
 
     // Check if process still exists
-    if let Ok(_) = signal::kill(pid, None) {
+    if signal::kill(pid, None).is_ok() {
         // Process still running, send SIGKILL
         if let Err(e) = signal::kill(pid, Signal::SIGKILL) {
             return Err(format!("Failed to send SIGKILL: {}", e));
@@ -66,12 +66,11 @@ fn stop_process_by_env_var(name: &str) -> Result<(), String> {
         // Parse environment variables
         let env_vars = String::from_utf8_lossy(&environ);
         for var in env_vars.split('\0') {
-            if let Some((key, value)) = var.split_once('=') {
-                if key == "PROCESS_MANAGER_ID" && value == name {
+            if let Some((key, value)) = var.split_once('=') 
+                && key == "PROCESS_MANAGER_ID" && value == name {
                     // Found matching process, stop it
                     return stop_process_by_pid(pid);
                 }
-            }
         }
     }
 
