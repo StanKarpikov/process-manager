@@ -36,6 +36,9 @@ pub(crate) struct ServiceConfig {
     #[serde(default = "default_env")]
     pub env: Option<HashMap<String, String>>,
 
+    #[serde(default)]
+    pub user: Option<String>,
+
     pub command: String,
 
     #[serde(default = "default_watchdog")]

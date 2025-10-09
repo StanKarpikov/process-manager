@@ -151,6 +151,7 @@ fn run_command(
     cpu: Option<&CpuSelection>,
     cpu_limit: Option<u32>,
     workdir: &String,
+    user: Option<&String>,
 ) -> Option<Child> {
     // Remove lock files using Rust's file removal implementation before starting the main process
     let lock_path1 = Path::new(log_dir).join(".lock");
@@ -174,6 +175,11 @@ fn run_command(
 
     // Now create the shell command without the rm commands
     let mut shell_command = command.to_string();
+
+    // If user is specified, wrap the command with runuser
+    if let Some(user) = user {
+        shell_command = format!("runuser -u {} -- {}", user, shell_command);
+    }
 
     // Apply CPU affinity if specified
     if let Some(cpu_selection) = cpu {
@@ -287,6 +293,7 @@ async fn start_process(
         service_config.cpu.as_ref(),
         service_config.cpu_limit,
         &service_config.workdir,
+        service_config.user.as_ref(),
     ) {
         Some(c) => c,
         None => {
