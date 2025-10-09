@@ -4,8 +4,23 @@ set -e
 TARGET_DIR="target/release"
 PROCESS_MANAGER="$TARGET_DIR/process_manager"
 
-if [ -z "$1" ]; then
-    echo "Usage: $0 <output_directory>"
+# Parse named parameters
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --bin-lib-destination-folder=*)
+            OUTPUT_DIR="${1#*=}"
+            shift
+            ;;
+        *)
+            echo "Unknown parameter: $1"
+            echo "Usage: $0 --bin-lib-destination-folder=PATH"
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$OUTPUT_DIR" ]; then
+    echo "Usage: $0 --bin-lib-destination-folder=PATH"
     exit 1
 fi
 
@@ -14,7 +29,6 @@ if [ ! -d "$TARGET_DIR" ]; then
     exit 1
 fi
 
-OUTPUT_DIR="$1"
 mkdir -p "$OUTPUT_DIR"
 
 echo "Copying Process Manager to $OUTPUT_DIR/"
