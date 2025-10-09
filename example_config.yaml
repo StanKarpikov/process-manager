@@ -5,7 +5,7 @@ econfmanager:
 
 services:
   simulator:
-    enable:
+    enable_parameter:
       "image_acquisition@source": 0
     env:
       WIDTH: "image_acquisition@image_width"
@@ -18,3 +18,4 @@ services:
 
   processor:
     command: "./processor"
+    enable: false

@@ -22,7 +22,16 @@ pub(crate) enum CpuSelection {
     #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ServiceConfig {
     #[serde(default = "default_enable")]
-    pub enable: HashMap<String, serde_json::Value>,
+    pub enable_parameter: HashMap<String, serde_json::Value>,
+
+    #[serde(default = "default_enable_bool")]
+    pub enable: BoolOrString,
+
+    #[serde(default = "default_disabled_bool")]
+    pub disabled: BoolOrString,
+
+    #[serde(default = "default_one_shot")]
+    pub one_shot: bool,
 
     #[serde(default = "default_env")]
     pub env: Option<HashMap<String, String>>,
@@ -47,6 +56,31 @@ pub(crate) struct ServiceConfig {
     pub workdir: String,
 }
 
+fn default_one_shot() -> bool {
+    false
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum BoolOrString {
+    Bool(bool),
+    String(String),
+}
+
+impl Default for BoolOrString {
+    fn default() -> Self {
+        BoolOrString::Bool(true)
+    }
+}
+
+fn default_enable_bool() -> BoolOrString {
+    BoolOrString::Bool(true)
+}
+
+fn default_disabled_bool() -> BoolOrString {
+    BoolOrString::Bool(false)
+}
+
 #[derive(Deserialize, Default)]
 pub(crate) struct EconfmanagerConfig {
     #[serde(default = "default_database_path")]
@@ -67,11 +101,11 @@ pub(crate) struct Config {
  * PRIVATE FUNCTIONS
  ******************************************************************************/
 
-    fn default_enable() -> HashMap<String, serde_json::Value> {
-        HashMap::new()
-    }
+fn default_enable() -> HashMap<String, serde_json::Value> {
+    HashMap::new()
+}
 
-    fn default_env() -> Option<HashMap<String, String>> {
+fn default_env() -> Option<HashMap<String, String>> {
     None
 }
 

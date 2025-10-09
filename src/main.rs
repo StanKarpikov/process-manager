@@ -1,6 +1,6 @@
 use arguments::Args;
 use clap::Parser;
-use configfile::{Config, ServiceConfig, Watchdog, CpuSelection};
+use configfile::{Config, ServiceConfig, Watchdog, CpuSelection, BoolOrString};
 use econfmanager::generated::ParameterId;
 use econfmanager::interface::InterfaceInstance;
 use econfmanager::interface::ParameterUpdateCallback;
@@ -28,7 +28,7 @@ use std::sync::OnceLock;
 static PROCESS_COLORS: OnceLock<Mutex<HashMap<String, Style>>> = OnceLock::new();
 
 #[macro_export]
-macro_rules! process_info {
+macro_rules! log_process_info {
     ($process_name:expr, $($arg:tt)*) => {{
         let process_name = $process_name;
         let message = format!($($arg)*);
@@ -46,7 +46,7 @@ macro_rules! process_info {
 }
 
 #[macro_export]
-macro_rules! process_warn {
+macro_rules! log_process_warn {
     ($process_name:expr, $($arg:tt)*) => {{
         let process_name = $process_name;
         let message = format!($($arg)*);
@@ -55,7 +55,7 @@ macro_rules! process_warn {
         let colors = PROCESS_COLORS.get_or_init(|| Mutex::new(HashMap::new()));
         let default_style = Style::default();
         let color = colors.lock().unwrap()
-            .get(process_name)
+            .get(&process_name.clone())
             .cloned()
             .unwrap_or(default_style);
 
@@ -64,7 +64,7 @@ macro_rules! process_warn {
 }
 
 #[macro_export]
-macro_rules! process_error {
+macro_rules! log_process_error {
     ($process_name:expr, $($arg:tt)*) => {{
         let process_name = $process_name;
         let message = format!($($arg)*);
@@ -158,17 +158,17 @@ fn run_command(
 
     if lock_path1.exists() {
         if let Err(e) = fs::remove_file(&lock_path1) {
-            process_warn!(name, "Failed to remove {lock_path1:?}: {e}");
+            log_process_warn!(name, "Failed to remove {lock_path1:?}: {e}");
         } else {
-            process_info!(name, "Removed lock file: {lock_path1:?}");
+            log_process_info!(name, "Removed lock file: {lock_path1:?}");
         }
     }
 
     if lock_path2.exists() {
         if let Err(e) = fs::remove_file(&lock_path2) {
-            process_warn!(name, "Failed to remove {lock_path2:?}: {e}");
+            log_process_warn!(name, "Failed to remove {lock_path2:?}: {e}");
         } else {
-            process_info!(name, "Removed lock file: {lock_path2:?}");
+            log_process_info!(name, "Removed lock file: {lock_path2:?}");
         }
     }
 
@@ -196,11 +196,11 @@ fn run_command(
 
     match cmd.spawn() {
         Ok(child) => {
-            process_info!(name, "Process `{shell_command}` started");
+            log_process_info!(name, "Process `{shell_command}` started");
             Some(child)
         }
         Err(e) => {
-            process_error!(name, "Failed to spawn process {shell_command}: {e}");
+            log_process_error!(name, "Failed to spawn process {shell_command}: {e}");
             None
         }
     }
@@ -218,6 +218,33 @@ async fn stop_process(processes: Arc<Mutex<HashMap<String, ProcessInfo>>>, name:
     }
 }
 
+fn build_env_vars(
+    name: &str,
+    service_config: &ServiceConfig,
+    interface: &InterfaceInstance,
+) -> HashMap<String, String> {
+    let mut env_vars = std::env::vars().collect::<HashMap<_, _>>();
+    if let Some(env_config) = &service_config.env {
+        for (env_var, env_value) in env_config {
+            if let Some(param_id) = interface.get_parameter_id_from_name(env_value.clone()) {
+                if let Ok(value) = interface.get(param_id, false) {
+                    let value_str = InterfaceInstance::value_to_string(&value);
+                    log_process_info!(name.to_string(), "Adding env value {env_var} = {value_str} (from parameter {})", env_value);
+                    env_vars.insert(env_var.clone(), value_str);
+                } else {
+                    log_process_info!(name.to_string(), "Adding env value {env_var} = {env_value} (literal)");
+                    env_vars.insert(env_var.clone(), env_value.clone());
+                }
+            } else {
+                log_process_info!(name.to_string(), "Adding env value {env_var} = {env_value} (literal)");
+                env_vars.insert(env_var.clone(), env_value.clone());
+            }
+        }
+    }
+    env_vars.insert("PROCESS_MANAGER_UUID".to_string(), name.to_string());
+    env_vars
+}
+
 async fn start_process(
     processes: Arc<Mutex<HashMap<String, ProcessInfo>>>,
     name: String,
@@ -226,60 +253,31 @@ async fn start_process(
     only_if_env_changed: bool,
     restart: bool,
 ) {
-    let mut env_vars = HashMap::new();
-    for (key, value) in std::env::vars() {
-        env_vars.insert(key, value);
-    }
+    let env_vars = build_env_vars(&name, service_config, interface);
 
-    // For each (env_var, env_value) in the service's env config:
-    // - If env_value matches a known parameter name, use the parameter's value.
-    // - Otherwise, treat env_value as a literal and set it directly.
-    // This allows both:
-    //   env: { RUST_LOG: warn }         # sets RUST_LOG=warn
-    //   env: { FOO: some_param_name }   # sets FOO to the value of parameter "some_param_name"
-    if let Some(env_config) = &service_config.env {
-        for (env_var, env_value) in env_config {
-            if let Some(param_id) = interface.get_parameter_id_from_name(env_value.clone()) {
-                if let Ok(value) = interface.get(param_id, false) {
-                    let value_str = InterfaceInstance::value_to_string(&value);
-                    process_info!(name.clone(), "Adding env value {env_var} = {value_str} (from parameter {})", env_value);
-                    env_vars.insert(env_var.clone(), value_str);
-                } else {
-                    // Use as literal value
-                    process_info!(name.clone(), "Adding env value {env_var} = {env_value} (literal)");
-                    env_vars.insert(env_var.clone(), env_value.clone());
-                }
-            } else {
-                // Use as literal value
-                process_info!(name.clone(), "Adding env value {env_var} = {env_value} (literal)");
-                env_vars.insert(env_var.clone(), env_value.clone());
-            }
-        }
-    }
-
-    env_vars.insert("PROCESS_MANAGER_UUID".to_string(), name.to_string());
-
-    if only_if_env_changed {
+    // Check if already running
+    {
         let mut processes = processes.lock().unwrap();
         if let Some(process_info) = processes.get_mut(&name) {
-            if process_info.env_vars == env_vars {
-                process_info!(name, "Env unchanged, skip restart");
+            if service_config.one_shot && process_info.child.is_some() {
+                log_process_info!(name, "Already running (one_shot)");
+                return;
+            }
+            if !restart && process_info.child.is_some() {
+                log_process_info!(name, "Already running");
+                return;
+            }
+            if only_if_env_changed && process_info.env_vars == env_vars {
+                log_process_info!(name, "Env unchanged, skip restart");
                 return;
             }
         }
     }
 
-    if !restart {
-        let mut processes = processes.lock().unwrap();
-        if let Some(process_info) = processes.get_mut(&name) {
-            if process_info.child.is_some() {
-                process_info!(name, "Already running");
-                return;
-            }
-        }
+    // For one_shot, do not stop or restart, just start if not running
+    if !service_config.one_shot {
+        stop_process(processes.clone(), name.clone()).await;
     }
-
-    stop_process(processes.clone(), name.clone()).await;
 
     let mut child = match run_command(
         &name,
@@ -292,49 +290,61 @@ async fn start_process(
     ) {
         Some(c) => c,
         None => {
-            process_error!(name, "Failed to run the process");
+            log_process_error!(name, "Failed to run the process{}", if service_config.one_shot { " (one_shot)" } else { "" });
             return;
         }
     };
 
+    if service_config.one_shot {
+        let mut processes_locked = processes.lock().unwrap();
+        processes_locked.insert(
+            name.clone(),
+            ProcessInfo {
+                child: Some(child),
+                last_output: Instant::now(),
+                died_at: None,
+                env_vars,
+            },
+        );
+        log_process_info!(name, "Started (one_shot)");
+        return;
+    }
+
+    // Take stdout/stderr directly from child before inserting into map
     let stdout = child.stdout.take().expect("Failed to get stdout");
     let stderr = child.stderr.take().expect("Failed to get stderr");
 
-    // Store the process in our tracking structure first
-    let mut processes_locked = processes.lock().unwrap();
-    processes_locked.insert(
-        name.clone(),
-        ProcessInfo {
-            child: Some(child),
-            last_output: Instant::now(),
-            died_at: None,
-            env_vars,
-        },
-    );
+    {
+        let mut processes_locked = processes.lock().unwrap();
+        processes_locked.insert(
+            name.clone(),
+            ProcessInfo {
+                child: Some(child),
+                last_output: Instant::now(),
+                died_at: None,
+                env_vars,
+            },
+        );
+    }
 
-    // Release the lock before starting async tasks
-    drop(processes_locked);
-
-    // Start output reader tasks
     let processes_clone_stdout = processes.clone();
     let processes_clone_stderr = processes.clone();
     let name_clone_stdout = name.clone();
     let name_clone_stderr = name.clone();
-    // let watchdog_type = service_config.watchdog.clone();
 
     tokio::spawn(async move {
         let stdout_reader = BufReader::new(stdout);
         for line in stdout_reader.lines() {
             match line {
                 Ok(line) => {
-                    process_info!(&name_clone_stdout, "stdout {}", line);
+                    log_process_info!(&name_clone_stdout, "stdout {}", line);
                     let mut processes = processes_clone_stdout.lock().unwrap();
                     if let Some(process_info) = processes.get_mut(&name_clone_stdout) {
                         process_info.last_output = Instant::now();
                     }
                 }
                 Err(e) => {
-                    process_error!(name_clone_stdout, "Error reading stdout: {}", e);
+                    log_process_error!(name_clone_stdout, "Error reading stdout: {}", e);
                     break;
                 }
             }
@@ -346,14 +356,14 @@ async fn start_process(
         for line in stderr_reader.lines() {
             match line {
                 Ok(line) => {
-                    process_error!(&name_clone_stderr, "{}{}", ansi_term::Color::Red.paint("stderr: "), line);
+                    log_process_error!(&name_clone_stderr, "{}{}", ansi_term::Color::Red.paint("stderr: "), line);
                     let mut processes = processes_clone_stderr.lock().unwrap();
                     if let Some(process_info) = processes.get_mut(&name_clone_stderr) {
                         process_info.last_output = Instant::now();
                     }
                 }
                 Err(e) => {
-                    process_error!(name_clone_stderr, "Error reading stderr: {}", e);
+                    log_process_error!(name_clone_stderr, "Error reading stderr: {}", e);
                     break;
                 }
             }
@@ -368,8 +378,17 @@ fn process_callback(state: &mut AppState, id: ParameterId) {
     if let Ok(value) = state.interface.get(id, false) {
         for (service_name, service_config) in &state.services {
             let mut requested_state_change = false;
-            if service_config.enable.contains_key(&name) {
-                let expected_value = &service_config.enable[&name];
+
+            // If enable is false, always stop the process and skip enable_parameter logic
+            let enable = resolve_bool_or_string(&service_config.enable);
+            let disabled = resolve_bool_or_string(&service_config.disabled);
+
+            if !enable || disabled {
+                log_process_info!(service_name, "Enable is false or disabled is true, stopping process");
+                let _ = state.tx.send(ServiceCommand::Stop(service_name.clone()));
+                requested_state_change = true;
+            } else if service_config.enable_parameter.contains_key(&name) {
+                let expected_value = &service_config.enable_parameter[&name];
 
                 let should_run = match state.interface.set_from_json(id, expected_value) {
                     Ok(val) => val == value,
@@ -380,14 +399,14 @@ fn process_callback(state: &mut AppState, id: ParameterId) {
                 };
 
                 if should_run {
-                    process_info!(service_name, 
+                    log_process_info!(service_name, 
                         "Enable parameter changed, {name} = {value}, starting"
                     );
                     let _ = state
                         .tx
                         .send(ServiceCommand::Start(service_name.clone()));
                 } else {
-                    process_info!(service_name, 
+                    log_process_info!(service_name, 
                         "Enable parameter changed, {name} = {value}, stopping"
                     );
                     let _ = state
@@ -400,7 +419,7 @@ fn process_callback(state: &mut AppState, id: ParameterId) {
             if !requested_state_change {
                 if let Some(env_config) = &service_config.env {
                     if env_config.values().any(|param_name| param_name == &name) {
-                        process_info!(service_name, 
+                        log_process_info!(service_name, 
                             "{name} parameter changed in env, restarting"
                         );
                         let _ = state
@@ -425,8 +444,12 @@ async fn watchdog_task(
         let now = Instant::now();
 
         for (name, process_info) in processes.iter_mut() {
+            let service = services.get(name).unwrap();
+            if service.one_shot {
+                // No watchdog, no restart for one_shot
+                continue;
+            }
             if let Some(child) = &mut process_info.child {
-                let service = services.get(name).unwrap();
                 let needs_restart = match &service.watchdog {
                     Watchdog::Stdout => {
                         now.duration_since(process_info.last_output)
@@ -436,21 +459,37 @@ async fn watchdog_task(
                 };
 
                 if needs_restart {
-                    process_warn!(name, "Watchdog timeout, restarting");
+                    log_process_warn!(name, "Watchdog timeout, restarting");
                     let _ = tx.send(ServiceCommand::ForceRestart(name.clone()));
                 }
 
                 if let Ok(Some(_)) = child.try_wait() {
-                    process_warn!(name, "~~~ Process died ~~~");
+                    log_process_warn!(name, "~~~ Process died ~~~");
                     process_info.died_at = Some(now);
                     process_info.child = None;
                 }
             } else if let Some(died_at) = process_info.died_at {
                 if now.duration_since(died_at) >= Duration::from_secs(5) {
-                    process_warn!(name, "Restarting process");
+                    log_process_warn!(name, "Restarting process");
                     let _ = tx.send(ServiceCommand::Start(name.clone()));
                     process_info.died_at = None;
                 }
+            }
+        }
+    }
+}
+
+fn resolve_bool_or_string(val: &BoolOrString) -> bool {
+    match val {
+        BoolOrString::Bool(b) => *b,
+        BoolOrString::String(env_var) => {
+            match std::env::var(env_var) {
+                Ok(v) => {
+                    let v = v.to_ascii_lowercase();
+                    v == "1" || v == "true" || v == "yes" || v == "on" || v == "enabled"
+                }
+                Err(std::env::VarError::NotPresent) => false,
+                Err(_) => false,
             }
         }
     }
@@ -510,7 +549,7 @@ async fn main() {
     };
 
     for (name, service) in &services {
-        process_info!(name, "Service: ");
+        log_process_info!(name, "Service: ");
         info!("\tCommand {}", &service.command);
         info!("\tEnable {:?}", &service.enable);
         info!("\tEnv {:?}", &service.env);
@@ -549,7 +588,7 @@ async fn main() {
         let mut params_to_watch = Vec::new();
 
         for service in app.services.values() {
-            for param_name in service.enable.keys() {
+            for param_name in service.enable_parameter.keys() {
                 params_to_watch.push(param_name.clone());
             }
 
@@ -563,48 +602,56 @@ async fn main() {
         for param_name in params_to_watch {
             if let Some(id) = app.interface.get_parameter_id_from_name(param_name.clone()) {
                 if let Err(e) = app.interface.add_callback(id, callback.clone()) {
-                    process_error!(param_name, "Failed to add callback: {}", e);
+                    log_process_error!(param_name, "Failed to add callback: {}", e);
                 }
             } else {
-                process_error!(param_name, "Parameter not found");
+                log_process_error!(param_name, "Parameter not found");
             }
         }
 
         // Initial check, start the processes
         for (name, service) in &app.services {
             let mut should_start = false;
-            if let Some((enable_parameter_name, expected_value)) = service.enable.iter().next() {
-                if let Some(id) = app
-                    .interface
-                    .get_parameter_id_from_name(enable_parameter_name.clone())
-                {
-                    if let Ok(value) = app.interface.get(id, false) {
-                        should_start = match app.interface.set_from_json(id, expected_value) {
-                            Ok(val) => val == value,
-                            Err(e) => {
-                                process_error!(name, "Failed to convert enable variable: {e}");
-                                true
-                            }
-                        };
+            let enable = resolve_bool_or_string(&service.enable);
+            let disabled = resolve_bool_or_string(&service.disabled);
+
+            if !enable || disabled {
+                should_start = false;
+                log_process_info!(name, "Disabled");
+            } else if !service.enable_parameter.is_empty() {
+                if let Some((enable_parameter_name, expected_value)) = service.enable_parameter.iter().next() {
+                    if let Some(id) = app
+                        .interface
+                        .get_parameter_id_from_name(enable_parameter_name.clone())
+                    {
+                        if let Ok(value) = app.interface.get(id, false) {
+                            should_start = match app.interface.set_from_json(id, expected_value) {
+                                Ok(val) => val == value,
+                                Err(e) => {
+                                    log_process_error!(name, "Failed to convert enable variable: {e}");
+                                    true
+                                }
+                            };
+                        }
+                    } else {
+                        log_process_error!(
+                            name,
+                            "Parameter {} not found",
+                            enable_parameter_name
+                        );
+                        should_start = true;
                     }
-                } else {
-                    process_error!(
-                        name,
-                        "Parameter {} not found",
-                        enable_parameter_name
-                    );
-                    should_start = true;
                 }
             } else {
-                process_info!(name, "No enable parameter set, always started");
+                log_process_info!(name, "No enable_parameter set, using enable: true");
                 should_start = true;
             }
 
             if should_start {
-                process_info!(name, "initial state: started");
+                log_process_info!(name, "initial state: started");
                 let _ = app.tx.send(ServiceCommand::Start(name.clone()));
             } else {
-                process_info!(name, "initial state: stopped");
+                log_process_info!(name, "initial state: stopped");
             }
         }
     }
@@ -641,7 +688,7 @@ async fn main() {
     while let Ok(cmd) = rx.recv() {
         match cmd {
             ServiceCommand::Start(name) => {
-                process_info!(&name, "Start requested, starting...");
+                log_process_info!(&name, "Start requested, starting...");
                 if let Some(service_config) = services.get(&name) {
                     let interface = &state.lock().unwrap().interface;
                     start_process(
@@ -656,12 +703,16 @@ async fn main() {
                 }
             }
             ServiceCommand::Stop(name) => {
-                process_info!(&name, "Stop requested, stopping...");
+                log_process_info!(&name, "Stop requested, stopping...");
                 stop_process(processes.clone(), name).await;
             }
             ServiceCommand::Restart(name) => {
-                process_info!(&name, "Restart received, restarting...");
                 if let Some(service_config) = services.get(&name) {
+                    if service_config.one_shot {
+                        log_process_info!(&name, "Restart requested, but one_shot is true. Ignoring.");
+                        continue;
+                    }
+                    log_process_info!(&name, "Restart received, restarting...");
                     let interface = &state.lock().unwrap().interface;
                     start_process(
                         processes.clone(),
@@ -675,8 +726,12 @@ async fn main() {
                 }
             }
             ServiceCommand::ForceRestart(name) => {
-                process_info!(&name, "ForceRestart received, restarting...");
                 if let Some(service_config) = services.get(&name) {
+                    if service_config.one_shot {
+                        log_process_info!(&name, "ForceRestart requested, but one_shot is true. Ignoring.");
+                        continue;
+                    }
+                    log_process_info!(&name, "ForceRestart received, restarting...");
                     let interface = &state.lock().unwrap().interface;
                     start_process(
                         processes.clone(),
