@@ -19,7 +19,7 @@ pub(crate) enum CpuSelection {
      None,
  }
  
-    #[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ServiceConfig {
     #[serde(default = "default_enable")]
     pub enable_parameter: HashMap<String, serde_json::Value>,

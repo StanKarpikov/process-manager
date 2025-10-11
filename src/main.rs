@@ -391,7 +391,7 @@ fn process_callback(state: &mut AppState, id: ParameterId) {
             let disabled = resolve_bool_or_string(&service_config.disabled);
 
             if !enable || disabled {
-                log_process_info!(service_name, "Enable is false or disabled is true, stopping process");
+                log_process_info!(service_name, "Enable ({enable}) is false or disabled {disabled} is true, stopping process");
                 let _ = state.tx.send(ServiceCommand::Stop(service_name.clone()));
                 requested_state_change = true;
             } else if service_config.enable_parameter.contains_key(&name) {
@@ -492,6 +492,7 @@ fn resolve_bool_or_string(val: &BoolOrString) -> bool {
         BoolOrString::String(env_var) => {
             match std::env::var(env_var) {
                 Ok(v) => {
+                    info!("Checking env variable {env_var} = {v}");
                     let v = v.to_ascii_lowercase();
                     v == "1" || v == "true" || v == "yes" || v == "on" || v == "enabled"
                 }
@@ -559,6 +560,8 @@ async fn main() {
         log_process_info!(name, "Service: ");
         info!("\tCommand {}", &service.command);
         info!("\tEnable {:?}", &service.enable);
+        info!("\tDisabled {:?}", &service.disabled);
+        info!("\tEnable Parameter: {:?}", &service.enable_parameter);
         info!("\tEnv {:?}", &service.env);
         info!("\tWatchdog {:?}", &service.watchdog);
         info!("\tLog Dir {:?}", &service.log_dir);
@@ -621,10 +624,11 @@ async fn main() {
             let mut should_start = false;
             let enable = resolve_bool_or_string(&service.enable);
             let disabled = resolve_bool_or_string(&service.disabled);
+            log_process_info!(name, "Enabled - {:?}: {}", service.enable, enable);
+            log_process_info!(name, "Disabled - {:?}: {}", service.disabled, disabled);
 
             if !enable || disabled {
                 should_start = false;
-                log_process_info!(name, "Disabled");
             } else if !service.enable_parameter.is_empty() {
                 if let Some((enable_parameter_name, expected_value)) = service.enable_parameter.iter().next() {
                     if let Some(id) = app
@@ -639,6 +643,9 @@ async fn main() {
                                     true
                                 }
                             };
+                            log_process_info!(name, 
+                                "Enable parameter: {enable_parameter_name}, require {expected_value} to start, current value is {value}. Therefore should_start = {should_start}"
+                            );
                         }
                     } else {
                         log_process_error!(
