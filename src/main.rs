@@ -637,15 +637,17 @@ async fn main() {
                     {
                         if let Ok(value) = app.interface.get(id, false) {
                             should_start = match app.interface.set_from_json(id, expected_value) {
-                                Ok(val) => val == value,
+                                Ok(val) => {
+                                    log_process_info!(name, 
+                                        "Enable parameter: {enable_parameter_name}, require {val} to start, current value is {value}. Therefore should_start = {should_start}"
+                                    );
+                                    val == value
+                                },
                                 Err(e) => {
                                     log_process_error!(name, "Failed to convert enable variable: {e}");
                                     true
                                 }
                             };
-                            log_process_info!(name, 
-                                "Enable parameter: {enable_parameter_name}, require {expected_value} to start, current value is {value}. Therefore should_start = {should_start}"
-                            );
                         }
                     } else {
                         log_process_error!(
