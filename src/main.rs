@@ -6,6 +6,7 @@ use econfmanager::interface::InterfaceInstance;
 use econfmanager::interface::ParameterUpdateCallback;
 use ansi_term::Colour;
 use ansi_term::Style;
+use econfmanager::schema::ParameterValueType;
 use env_logger::Env;
 use log::{error, info, warn};
 use std::sync::Mutex;
@@ -212,12 +213,27 @@ fn run_command(
     }
 }
 
-async fn stop_process(processes: Arc<Mutex<HashMap<String, ProcessInfo>>>, name: String) {
+async fn stop_process(
+    processes: Arc<Mutex<HashMap<String, ProcessInfo>>>,
+    name: String,
+    service_config: &ServiceConfig,
+) {
     let mut processes = processes.lock().unwrap();
     if let Some(process_info) = processes.get_mut(&name) {
-            if let Some(child) = &mut process_info.child {
-                let _ = process_management::stop_process(Some(child.id() as i32), name.clone());
-            }
+        // Execute stop_command if available
+        if let Some(stop_command) = &service_config.stop_command {
+            log_process_info!(&name, "Executing stop command: {}", stop_command);
+            let _ = Command::new("sh")
+                .arg("-c")
+                .arg(stop_command)
+                .spawn()
+                .and_then(|mut child| child.wait());
+        }
+
+        // Stop the process
+        if let Some(child) = &mut process_info.child {
+            let _ = process_management::stop_process(Some(child.id() as i32), name.clone());
+        }
 
         // Remove the process from tracking
         process_info.child = None;
@@ -282,7 +298,7 @@ async fn start_process(
 
     // For one_shot, do not stop or restart, just start if not running
     if !service_config.one_shot {
-        stop_process(processes.clone(), name.clone()).await;
+        stop_process(processes.clone(), name.clone(), service_config).await;
     }
 
     let mut child = match run_command(
@@ -720,7 +736,9 @@ async fn main() {
             }
             ServiceCommand::Stop(name) => {
                 log_process_info!(&name, "Stop requested, stopping...");
-                stop_process(processes.clone(), name).await;
+                if let Some(service_config) = services.get(&name) {
+                    stop_process(processes.clone(), name, service_config).await;
+                }
             }
             ServiceCommand::Restart(name) => {
                 if let Some(service_config) = services.get(&name) {

@@ -57,6 +57,9 @@ pub(crate) struct ServiceConfig {
 
     #[serde(default = "default_workdir")]
     pub workdir: String,
+
+    #[serde(default = "default_stop_command")]
+    pub stop_command: Option<String>,
 }
 
 fn default_one_shot() -> bool {
@@ -118,6 +121,10 @@ fn default_watchdog_timeout_s() -> u64 {
 
 fn default_workdir() -> String {
     ".".to_string()  // Add a default value for the new "workdir" parameter
+}
+
+fn default_stop_command() -> Option<String> {
+    None
 }
 
 fn default_watchdog() -> Watchdog {
