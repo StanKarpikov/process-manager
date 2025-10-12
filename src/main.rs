@@ -639,7 +639,7 @@ async fn main() {
                             should_start = match app.interface.set_from_json(id, expected_value) {
                                 Ok(val) => {
                                     log_process_info!(name, 
-                                        "Enable parameter: {enable_parameter_name}, require {val} to start, current value is {value}. Therefore should_start = {should_start}"
+                                        "Enable parameter: {enable_parameter_name}, require {val} to start, current value is {value}"
                                     );
                                     val == value
                                 },
