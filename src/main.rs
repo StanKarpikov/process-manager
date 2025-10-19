@@ -83,6 +83,8 @@ macro_rules! log_process_error {
 
 const PERIODIC_UPDATE_INTERVAL: Duration = Duration::from_millis(5000);
 
+
+
 #[derive(Debug)]
 struct ProcessInfo {
     child: Option<Child>,
@@ -281,6 +283,18 @@ async fn start_process(
     {
         let mut processes = processes.lock().unwrap();
         if let Some(process_info) = processes.get_mut(&name) {
+            // Check if the process has actually exited
+            if let Some(child) = &mut process_info.child {
+                let name_for_log = name.clone();
+                let (alive, zombie) = process_management::is_alive(child.id() as i32);
+                if !alive {
+                    log_process_info!(name_for_log, "Process was not alive, cleaning up state");
+                    process_info.child = None;
+                    process_info.died_at = Some(std::time::Instant::now());
+                } else if zombie {
+                    log_process_warn!(name_for_log, "Process is a zombie (defunct, waiting for parent to reap)");
+                }
+            }
             if service_config.one_shot && process_info.child.is_some() {
                 log_process_info!(name, "Already running (one_shot)");
                 return;
@@ -486,10 +500,13 @@ async fn watchdog_task(
                     let _ = tx.send(ServiceCommand::ForceRestart(name.clone()));
                 }
 
-                if let Ok(Some(_)) = child.try_wait() {
+                let (alive, zombie) = process_management::is_alive(child.id() as i32);
+                if !alive {
                     log_process_warn!(name, "~~~ Process died ~~~");
                     process_info.died_at = Some(now);
                     process_info.child = None;
+                } else if zombie {
+                    log_process_warn!(name, "Process is a zombie (defunct, waiting for parent to reap)");
                 }
             } else if let Some(died_at) = process_info.died_at {
                 if now.duration_since(died_at) >= Duration::from_secs(5) {
