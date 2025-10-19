@@ -1,2 +1,5 @@
 [env]
 PARAMETERS_PROTO_PATH = { value = "example", relative = true, force = false }
+
+[build]
+rustflags = ["--cfg", "tokio_unstable"]

@@ -9,7 +9,7 @@ nix = { version = "0.28", features = ["signal", "process"] }
 ansi_term = "0.12"
 log = "0.4.27"
 serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1.45.1", features = ["full"] }
+tokio = { version = "1.45.1", features = ["full", "tracing"] }
 serde_json = "1"
 chrono = "0.4.41"
 sysinfo = "0.29"
@@ -18,3 +18,4 @@ clap = { version = "4.4", features = ["derive", "cargo"] }
 econfmanager = { git = "https://github.com/StanKarpikov/econfmanager.git", branch = "feature/yaml-config" }
 serde_yaml = "0.9.34"
 num_cpus = "1.17.0"
+console-subscriber = "0.4.1"

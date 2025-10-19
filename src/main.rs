@@ -11,12 +11,12 @@ use log::{error, info, warn};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::io::{BufRead, BufReader};
+use tokio::io::{BufReader, AsyncBufReadExt};
 use std::path::Path;
-use std::process::Child;
-use std::process::{Command, Stdio};
+use tokio::process::Command;
+use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -25,8 +25,9 @@ pub mod configfile;
 pub mod process_management;
 
 use std::sync::OnceLock;
+use std::sync::Mutex as StdMutex;
 
-static PROCESS_COLORS: OnceLock<Mutex<HashMap<String, Style>>> = OnceLock::new();
+static PROCESS_COLORS: OnceLock<StdMutex<HashMap<String, Style>>> = OnceLock::new();
 
 #[macro_export]
 macro_rules! log_process_info {
@@ -35,7 +36,7 @@ macro_rules! log_process_info {
         let message = format!($($arg)*);
 
         // Get color for this process
-        let colors = PROCESS_COLORS.get_or_init(|| Mutex::new(HashMap::new()));
+        let colors = PROCESS_COLORS.get_or_init(|| StdMutex::new(HashMap::new()));
         let default_style = Style::default();
         let color = colors.lock().unwrap()
             .get(&process_name.clone())
@@ -53,7 +54,7 @@ macro_rules! log_process_warn {
         let message = format!($($arg)*);
 
         // Get color for this process
-        let colors = PROCESS_COLORS.get_or_init(|| Mutex::new(HashMap::new()));
+        let colors = PROCESS_COLORS.get_or_init(|| StdMutex::new(HashMap::new()));
         let default_style = Style::default();
         let color = colors.lock().unwrap()
             .get(&process_name.clone())
@@ -70,7 +71,7 @@ macro_rules! log_process_error {
         let process_name = $process_name;
         let message = format!($($arg)*);
 
-        let colors = PROCESS_COLORS.get_or_init(|| Mutex::new(HashMap::new()));
+        let colors = PROCESS_COLORS.get_or_init(|| StdMutex::new(HashMap::new()));
         let default_style = Style::default();
         let color = colors.lock().unwrap()
             .get(&process_name.clone())
@@ -85,7 +86,7 @@ const PERIODIC_UPDATE_INTERVAL: Duration = Duration::from_millis(5000);
 
 #[derive(Debug)]
 struct ProcessInfo {
-    child: Option<Child>,
+    child: Option<tokio::process::Child>,
     last_output: Instant,
     died_at: Option<Instant>,
     env_vars: HashMap<String, String>,
@@ -146,7 +147,7 @@ fn create_cpu_limit_command(cpu_limit: u32, command: &String) -> String {
     format!("cpulimit -l {} -- {}", cpu_limit, command)
 }
 
-fn run_command(
+async fn run_command(
     name: &String,
     command: &str,
     env_vars: &HashMap<String, String>,
@@ -155,7 +156,7 @@ fn run_command(
     cpu_limit: Option<u32>,
     workdir: &String,
     user: Option<&String>,
-) -> Option<Child> {
+) -> Option<tokio::process::Child> {
     // Remove lock files using Rust's file removal implementation before starting the main process
     let lock_path1 = Path::new(log_dir).join(".lock");
     let lock_path2 = Path::new(log_dir).join("lock");
@@ -223,12 +224,12 @@ async fn stop_process(
     name: String,
     service_config: &ServiceConfig,
 ) {
-    let mut processes = processes.lock().unwrap();
+    let mut processes = processes.lock().await;
     if let Some(process_info) = processes.get_mut(&name) {
         // Execute stop_command if available
         if let Some(stop_command) = &service_config.stop_command {
             log_process_info!(&name, "Executing stop command: {}", stop_command);
-            let _ = Command::new("sh")
+            let _ = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(stop_command)
                 .spawn()
@@ -237,7 +238,9 @@ async fn stop_process(
 
         // Stop the process
         if let Some(child) = &mut process_info.child {
-            let _ = process_management::stop_process(Some(child.id() as i32), name.clone());
+            if let Some(pid) = child.id() {
+                let _ = process_management::stop_process(Some(pid as i32), name.clone());
+            }
         }
 
         // Remove the process from tracking
@@ -294,21 +297,27 @@ async fn start_process(
 
     // Check if already running
     {
-        let mut processes = processes.lock().unwrap();
+        let mut processes = processes.lock().await;
         if let Some(process_info) = processes.get_mut(&name) {
             // Check if the process has actually exited
             if let Some(child) = &mut process_info.child {
                 let name_for_log = name.clone();
-                let (alive, zombie) = process_management::is_alive(child.id() as i32);
-                if !alive {
-                    log_process_info!(name_for_log, "Process was not alive, cleaning up state");
+                if let Some(pid) = child.id() {
+                    let (alive, zombie) = process_management::is_alive(pid as i32);
+                    if !alive {
+                        log_process_info!(name_for_log, "Process was not alive, cleaning up state");
+                        process_info.child = None;
+                    process_info.died_at = Some(std::time::Instant::now());
+                    } else if zombie {
+                        log_process_warn!(
+                            name_for_log,
+                            "Process is a zombie (defunct, waiting for parent to reap)"
+                        );
+                    }
+                } else {
+                    log_process_info!(name_for_log, "Process has no PID, cleaning up state");
                     process_info.child = None;
                     process_info.died_at = Some(std::time::Instant::now());
-                } else if zombie {
-                    log_process_warn!(
-                        name_for_log,
-                        "Process is a zombie (defunct, waiting for parent to reap)"
-                    );
                 }
             }
             if service_config.one_shot && process_info.child.is_some() {
@@ -340,7 +349,7 @@ async fn start_process(
         service_config.cpu_limit,
         &service_config.workdir,
         service_config.user.as_ref(),
-    ) {
+    ).await {
         Some(c) => c,
         None => {
             log_process_error!(
@@ -357,7 +366,7 @@ async fn start_process(
     };
 
     if service_config.one_shot {
-        let mut processes_locked = processes.lock().unwrap();
+        let mut processes_locked = processes.lock().await;
         processes_locked.insert(
             name.clone(),
             ProcessInfo {
@@ -376,7 +385,7 @@ async fn start_process(
     let stderr = child.stderr.take().expect("Failed to get stderr");
 
     {
-        let mut processes_locked = processes.lock().unwrap();
+        let mut processes_locked = processes.lock().await;
         processes_locked.insert(
             name.clone(),
             ProcessInfo {
@@ -394,15 +403,21 @@ async fn start_process(
     let name_clone_stderr = name.clone();
 
     tokio::spawn(async move {
-        let stdout_reader = BufReader::new(stdout);
-        for line in stdout_reader.lines() {
-            match line {
-                Ok(line) => {
-                    log_process_info!(&name_clone_stdout, "stdout {}", line);
-                    let mut processes = processes_clone_stdout.lock().unwrap();
-                    if let Some(process_info) = processes.get_mut(&name_clone_stdout) {
-                        process_info.last_output = Instant::now();
+        let mut stdout_reader = BufReader::new(stdout);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match stdout_reader.read_until(b'\n', &mut buf).await {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    if let Ok(line) = String::from_utf8(buf.clone()) {
+                        log_process_info!(&name_clone_stdout, "stdout {}", line.trim_end());
+                        let mut processes = processes_clone_stdout.lock().await;
+                        if let Some(process_info) = processes.get_mut(&name_clone_stdout) {
+                            process_info.last_output = Instant::now();
+                        }
                     }
+                    tokio::task::yield_now().await;
                 }
                 Err(e) => {
                     log_process_error!(name_clone_stdout, "Error reading stdout: {}", e);
@@ -413,20 +428,26 @@ async fn start_process(
     });
 
     tokio::spawn(async move {
-        let stderr_reader = BufReader::new(stderr);
-        for line in stderr_reader.lines() {
-            match line {
-                Ok(line) => {
-                    log_process_error!(
-                        &name_clone_stderr,
-                        "{}{}",
-                        ansi_term::Color::Red.paint("stderr: "),
-                        line
-                    );
-                    let mut processes = processes_clone_stderr.lock().unwrap();
-                    if let Some(process_info) = processes.get_mut(&name_clone_stderr) {
-                        process_info.last_output = Instant::now();
+        let mut stderr_reader = BufReader::new(stderr);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match stderr_reader.read_until(b'\n', &mut buf).await {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    if let Ok(line) = String::from_utf8(buf.clone()) {
+                        log_process_error!(
+                            &name_clone_stderr,
+                            "{}{}",
+                            ansi_term::Color::Red.paint("stderr: "),
+                            line.trim_end()
+                        );
+                        let mut processes = processes_clone_stderr.lock().await;
+                        if let Some(process_info) = processes.get_mut(&name_clone_stderr) {
+                            process_info.last_output = Instant::now();
+                        }
                     }
+                    tokio::task::yield_now().await;
                 }
                 Err(e) => {
                     log_process_error!(name_clone_stderr, "Error reading stderr: {}", e);
@@ -439,7 +460,7 @@ async fn start_process(
     true
 }
 
-fn process_callback(state: &mut AppState, id: ParameterId) {
+async fn process_callback(state: &mut AppState, id: ParameterId) {
     let name = state.interface.get_name(id);
     info!("Received update for parameter: {}", name);
 
@@ -521,18 +542,20 @@ async fn watchdog_task(
     services: HashMap<String, ServiceConfig>,
     tx: mpsc::Sender<ServiceCommand>,
 ) {
-    info!("Creating Watchdog task");
+    info!("Starting Watchdog task");
     loop {
         tokio::time::sleep(Duration::from_secs(3)).await;
+        // info!("Watchdog");
 
         let mut to_force_restart = Vec::new();
         let mut to_start = Vec::new();
         {
-            let mut processes = processes.lock().unwrap();
+            let mut processes = processes.lock().await;
             let now = Instant::now();
 
             for (name, process_info) in processes.iter_mut() {
-                let service = services.get(name).unwrap();
+                // info!("Check {}", name);
+                let service = services.get(name.as_str()).unwrap();
                 if service.one_shot {
                     // No watchdog, no restart for one_shot
                     continue;
@@ -551,23 +574,30 @@ async fn watchdog_task(
                         to_force_restart.push(name.clone());
                     }
 
-                    let (alive, zombie) = process_management::is_alive(child.id() as i32);
-                    if !alive {
-                        log_process_warn!(name, "~~~ Process died ~~~");
-                        process_info.died_at = Some(now);
-                        process_info.child = None;
-                        to_force_restart.push(name.clone());
-                    } else if zombie {
-                        log_process_warn!(
-                            name,
-                            "Process {} is a zombie (defunct, waiting for parent to reap)",
-                            child.id() as i32
-                        );
-                        process_info.died_at = Some(now);
-                        process_info.child = None;
-                        to_force_restart.push(name.clone());
+                    if let Some(pid) = child.id() {
+                        let (alive, zombie) = process_management::is_alive(pid as i32);
+                        if !alive {
+                            log_process_warn!(name, "~~~ Process died ~~~");
+                            process_info.died_at = Some(now);
+                            process_info.child = None;
+                            to_force_restart.push(name.clone());
+                        } else if zombie {
+                            log_process_warn!(
+                                name,
+                                "Process {} is a zombie (defunct, waiting for parent to reap)",
+                                pid
+                            );
+                            process_info.died_at = Some(now);
+                            process_info.child = None;
+                            to_force_restart.push(name.clone());
+                        } else {
+                            // log_process_info!(name, "Alive and well ({})", pid);
+                        }
                     } else {
-                        // log_process_info!(name, "Alive and well ({})", child.id() as i32);
+                        log_process_warn!(name, "Process has no PID, treating as dead");
+                        process_info.died_at = Some(now);
+                        process_info.child = None;
+                        to_force_restart.push(name.clone());
                     }
                 } else if let Some(died_at) = process_info.died_at {
                     if now.duration_since(died_at) >= Duration::from_secs(5) {
@@ -616,8 +646,9 @@ fn schedule_restart(name: String, tx: mpsc::Sender<ServiceCommand>, delay: Durat
     });
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() {
+    console_subscriber::init();
     // Initialize a start time for relative timestamps
     let start_time = std::time::Instant::now();
 
@@ -699,98 +730,115 @@ async fn main() {
         tx.clone(),
     ));
 
-    let state_cloned = Arc::clone(&state);
+    // Create a channel for parameter update events
+    let (param_tx, mut param_rx) = tokio::sync::mpsc::unbounded_channel::<ParameterId>();
+
+    let _state_cloned = Arc::clone(&state);
     let callback = Arc::new(move |id: ParameterId| {
-        let state = Arc::clone(&state_cloned);
-        let mut app = state.lock().unwrap();
-        process_callback(&mut app, id);
+        // Instead of spawning a Tokio task here (which may panic if not in a Tokio runtime),
+        // send the event to the Tokio runtime via the channel.
+        let _ = param_tx.send(id);
     }) as ParameterUpdateCallback;
 
+    // NOTE: This block must be made async to use tokio::Mutex
     {
-        let mut app = state.lock().unwrap();
+        let state = Arc::clone(&state);
+        let callback = callback.clone();
+        tokio::spawn(async move {
+            let mut app = state.lock().await;
 
-        let mut params_to_watch = Vec::new();
+            let mut params_to_watch = Vec::new();
 
-        for service in app.services.values() {
-            for param_name in service.enable_parameter.keys() {
-                params_to_watch.push(param_name.clone());
-            }
-
-            if let Some(env_config) = &service.env {
-                for param_name in env_config.values() {
+            for service in app.services.values() {
+                for param_name in service.enable_parameter.keys() {
                     params_to_watch.push(param_name.clone());
                 }
-            }
-        }
 
-        for param_name in params_to_watch {
-            if let Some(id) = app.interface.get_parameter_id_from_name(param_name.clone()) {
-                if let Err(e) = app.interface.add_callback(id, callback.clone()) {
-                    log_process_error!(param_name, "Failed to add callback: {}", e);
-                }
-            } else {
-                log_process_error!(param_name, "Parameter not found");
-            }
-        }
-
-        // Initial check, start the processes
-        for (name, service) in &app.services {
-            let mut should_start = false;
-            let enable = resolve_bool_or_string(&service.enable);
-            let disabled = resolve_bool_or_string(&service.disabled);
-            log_process_info!(name, "Enabled - {:?}: {}", service.enable, enable);
-            log_process_info!(name, "Disabled - {:?}: {}", service.disabled, disabled);
-
-            if !enable || disabled {
-                should_start = false;
-            } else if !service.enable_parameter.is_empty() {
-                if let Some((enable_parameter_name, expected_value)) =
-                    service.enable_parameter.iter().next()
-                {
-                    if let Some(id) = app
-                        .interface
-                        .get_parameter_id_from_name(enable_parameter_name.clone())
-                    {
-                        if let Ok(value) = app.interface.get(id, false) {
-                            should_start = match app.interface.set_from_json(id, expected_value) {
-                                Ok(val) => {
-                                    log_process_info!(
-                                        name,
-                                        "Enable parameter: {enable_parameter_name}, require {val} to start, current value is {value}"
-                                    );
-                                    val == value
-                                }
-                                Err(e) => {
-                                    log_process_error!(
-                                        name,
-                                        "Failed to convert enable variable: {e}"
-                                    );
-                                    true
-                                }
-                            };
-                        }
-                    } else {
-                        log_process_error!(name, "Parameter {} not found", enable_parameter_name);
-                        should_start = true;
+                if let Some(env_config) = &service.env {
+                    for param_name in env_config.values() {
+                        params_to_watch.push(param_name.clone());
                     }
                 }
-            } else {
-                log_process_info!(name, "No enable_parameter set, using enable: true");
-                should_start = true;
             }
 
-            if should_start {
-                log_process_info!(name, "initial state: started");
-                let tx = app.tx.clone();
-                let name = name.clone();
-                tokio::spawn(async move {
-                    let _ = tx.send(ServiceCommand::Start(name)).await;
-                });
-            } else {
-                log_process_info!(name, "initial state: stopped");
+            for param_name in params_to_watch {
+                if let Some(id) = app.interface.get_parameter_id_from_name(param_name.clone()) {
+                    if let Err(e) = app.interface.add_callback(id, callback.clone()) {
+                        log_process_error!(param_name, "Failed to add callback: {}", e);
+                    }
+                } else {
+                    log_process_error!(param_name, "Parameter not found");
+                }
             }
-        }
+
+            // Initial check, start the processes
+            for (name, service) in &app.services {
+                let mut should_start = false;
+                let enable = resolve_bool_or_string(&service.enable);
+                let disabled = resolve_bool_or_string(&service.disabled);
+                log_process_info!(name, "Enabled - {:?}: {}", service.enable, enable);
+                log_process_info!(name, "Disabled - {:?}: {}", service.disabled, disabled);
+
+                if !enable || disabled {
+                    should_start = false;
+                } else if !service.enable_parameter.is_empty() {
+                    if let Some((enable_parameter_name, expected_value)) =
+                        service.enable_parameter.iter().next()
+                    {
+                        if let Some(id) = app
+                            .interface
+                            .get_parameter_id_from_name(enable_parameter_name.clone())
+                        {
+                            if let Ok(value) = app.interface.get(id, false) {
+                                should_start = match app.interface.set_from_json(id, expected_value) {
+                                    Ok(val) => {
+                                        log_process_info!(
+                                            name,
+                                            "Enable parameter: {enable_parameter_name}, require {val} to start, current value is {value}"
+                                        );
+                                        val == value
+                                    }
+                                    Err(e) => {
+                                        log_process_error!(
+                                            name,
+                                            "Failed to convert enable variable: {e}"
+                                        );
+                                        true
+                                    }
+                                };
+                            }
+                        } else {
+                            log_process_error!(name, "Parameter {} not found", enable_parameter_name);
+                            should_start = true;
+                        }
+                    }
+                } else {
+                    log_process_info!(name, "No enable_parameter set, using enable: true");
+                    should_start = true;
+                }
+
+                if should_start {
+                    log_process_info!(name, "initial state: started");
+                    let tx = app.tx.clone();
+                    let name = name.clone();
+                    tokio::spawn(async move {
+                        let _ = tx.send(ServiceCommand::Start(name)).await;
+                    });
+                } else {
+                    log_process_info!(name, "initial state: stopped");
+                }
+            }
+        });
     }
+
+    // Spawn a Tokio task to handle parameter update events in the Tokio runtime
+    let state_for_param = Arc::clone(&state);
+    tokio::spawn(async move {
+        while let Some(id) = param_rx.recv().await {
+            let mut app = state_for_param.lock().await;
+            process_callback(&mut app, id).await;
+        }
+    });
 
     // Initialize process colors
     {
@@ -810,9 +858,9 @@ async fn main() {
             ansi_term::Colour::Fixed(165),
         ];
 
-        let colors = PROCESS_COLORS.get_or_init(|| Mutex::new(HashMap::new()));
+        let colors = PROCESS_COLORS.get_or_init(|| StdMutex::new(HashMap::new()));
         let mut colors = colors.lock().unwrap();
-        for (i, name) in state.lock().unwrap().services.keys().enumerate() {
+        for (i, name) in state.lock().await.services.keys().enumerate() {
             let color = available_colors[i % available_colors.len()];
             let style = Style::new().fg(color).bold();
             colors.insert(name.clone(), style);
@@ -826,7 +874,7 @@ async fn main() {
             ServiceCommand::Start(name) => {
                 log_process_info!(&name, "Start requested, starting...");
                 if let Some(service_config) = services.get(&name) {
-                    let interface = &state.lock().unwrap().interface;
+                    let interface = &state.lock().await.interface;
                     let tx_clone = tx.clone();
                     let name_clone = name.clone();
                     let success = start_process(
@@ -859,7 +907,7 @@ async fn main() {
                         continue;
                     }
                     log_process_info!(&name, "Restart received, restarting...");
-                    let interface = &state.lock().unwrap().interface;
+                    let interface = &state.lock().await.interface;
                     let tx_clone = tx.clone();
                     let name_clone = name.clone();
                     let success = start_process(
@@ -886,7 +934,7 @@ async fn main() {
                         continue;
                     }
                     log_process_info!(&name, "ForceRestart received, restarting...");
-                    let interface = &state.lock().unwrap().interface;
+                    let interface = &state.lock().await.interface;
                     let tx_clone = tx.clone();
                     let name_clone = name.clone();
                     let success = start_process(

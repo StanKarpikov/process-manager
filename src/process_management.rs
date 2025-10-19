@@ -2,12 +2,12 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use std::thread;
 use std::time::Duration;
-use std::sync::Mutex;
 use std::collections::HashMap;
 use log::{error, warn};
 use ansi_term::Style;
 
 use crate::{log_process_error, log_process_warn, PROCESS_COLORS};
+use crate::StdMutex;
 
 const TERMINATE_TIMEOUT: Duration = Duration::from_secs(5);
 
