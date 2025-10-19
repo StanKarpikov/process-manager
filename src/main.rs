@@ -1,24 +1,24 @@
+use ansi_term::Colour;
+use ansi_term::Style;
 use arguments::Args;
 use clap::Parser;
-use configfile::{Config, ServiceConfig, Watchdog, CpuSelection, BoolOrString};
+use configfile::{BoolOrString, Config, CpuSelection, ServiceConfig, Watchdog};
 use econfmanager::generated::ParameterId;
 use econfmanager::interface::InterfaceInstance;
 use econfmanager::interface::ParameterUpdateCallback;
-use ansi_term::Colour;
-use ansi_term::Style;
-use econfmanager::schema::ParameterValueType;
 use env_logger::Env;
 use log::{error, info, warn};
-use std::sync::Mutex;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::Child;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use std::io::Write;
+use tokio::sync::mpsc;
 
 pub mod arguments;
 pub mod configfile;
@@ -83,8 +83,6 @@ macro_rules! log_process_error {
 
 const PERIODIC_UPDATE_INTERVAL: Duration = Duration::from_millis(5000);
 
-
-
 #[derive(Debug)]
 struct ProcessInfo {
     child: Option<Child>,
@@ -95,7 +93,7 @@ struct ProcessInfo {
 
 struct AppState {
     interface: InterfaceInstance,
-    tx: std::sync::mpsc::Sender<ServiceCommand>,
+    tx: mpsc::Sender<ServiceCommand>,
     services: HashMap<String, ServiceConfig>,
 }
 
@@ -123,7 +121,8 @@ fn create_cpu_affinity_mask(cpu_selection: &CpuSelection) -> String {
         }
         CpuSelection::Multiple(cpus) => {
             // Filter out invalid CPU numbers and use only valid ones
-            let valid_cpus: Vec<u32> = cpus.iter()
+            let valid_cpus: Vec<u32> = cpus
+                .iter()
                 .map(|cpu| {
                     if *cpu >= total_cpus as u32 {
                         (total_cpus - 1) as u32
@@ -133,7 +132,8 @@ fn create_cpu_affinity_mask(cpu_selection: &CpuSelection) -> String {
                 })
                 .collect();
 
-            valid_cpus.iter()
+            valid_cpus
+                .iter()
                 .map(|cpu| cpu.to_string())
                 .collect::<Vec<String>>()
                 .join(",")
@@ -198,7 +198,10 @@ fn run_command(
     if let Some(cpu_limit) = cpu_limit {
         shell_command = create_cpu_limit_command(cpu_limit, &shell_command);
     }
-    cmd.arg("-c").arg(&shell_command).envs(env_vars).current_dir(workdir);
+    cmd.arg("-c")
+        .arg(&shell_command)
+        .envs(env_vars)
+        .current_dir(workdir);
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -253,14 +256,24 @@ fn build_env_vars(
             if let Some(param_id) = interface.get_parameter_id_from_name(env_value.clone()) {
                 if let Ok(value) = interface.get(param_id, false) {
                     let value_str = InterfaceInstance::value_to_string(&value);
-                    log_process_info!(name.to_string(), "Adding env value {env_var} = {value_str} (from parameter {})", env_value);
+                    log_process_info!(
+                        name.to_string(),
+                        "Adding env value {env_var} = {value_str} (from parameter {})",
+                        env_value
+                    );
                     env_vars.insert(env_var.clone(), value_str);
                 } else {
-                    log_process_info!(name.to_string(), "Adding env value {env_var} = {env_value} (literal)");
+                    log_process_info!(
+                        name.to_string(),
+                        "Adding env value {env_var} = {env_value} (literal)"
+                    );
                     env_vars.insert(env_var.clone(), env_value.clone());
                 }
             } else {
-                log_process_info!(name.to_string(), "Adding env value {env_var} = {env_value} (literal)");
+                log_process_info!(
+                    name.to_string(),
+                    "Adding env value {env_var} = {env_value} (literal)"
+                );
                 env_vars.insert(env_var.clone(), env_value.clone());
             }
         }
@@ -276,7 +289,7 @@ async fn start_process(
     interface: &InterfaceInstance,
     only_if_env_changed: bool,
     restart: bool,
-) {
+) -> bool {
     let env_vars = build_env_vars(&name, service_config, interface);
 
     // Check if already running
@@ -292,20 +305,23 @@ async fn start_process(
                     process_info.child = None;
                     process_info.died_at = Some(std::time::Instant::now());
                 } else if zombie {
-                    log_process_warn!(name_for_log, "Process is a zombie (defunct, waiting for parent to reap)");
+                    log_process_warn!(
+                        name_for_log,
+                        "Process is a zombie (defunct, waiting for parent to reap)"
+                    );
                 }
             }
             if service_config.one_shot && process_info.child.is_some() {
                 log_process_info!(name, "Already running (one_shot)");
-                return;
+                return true;
             }
             if !restart && process_info.child.is_some() {
                 log_process_info!(name, "Already running");
-                return;
+                return true;
             }
             if only_if_env_changed && process_info.env_vars == env_vars {
                 log_process_info!(name, "Env unchanged, skip restart");
-                return;
+                return true;
             }
         }
     }
@@ -327,8 +343,16 @@ async fn start_process(
     ) {
         Some(c) => c,
         None => {
-            log_process_error!(name, "Failed to run the process{}", if service_config.one_shot { " (one_shot)" } else { "" });
-            return;
+            log_process_error!(
+                name,
+                "Failed to run the process{}",
+                if service_config.one_shot {
+                    " (one_shot)"
+                } else {
+                    ""
+                }
+            );
+            return false;
         }
     };
 
@@ -344,7 +368,7 @@ async fn start_process(
             },
         );
         log_process_info!(name, "Started (one_shot)");
-        return;
+        return true;
     }
 
     // Take stdout/stderr directly from child before inserting into map
@@ -393,7 +417,12 @@ async fn start_process(
         for line in stderr_reader.lines() {
             match line {
                 Ok(line) => {
-                    log_process_error!(&name_clone_stderr, "{}{}", ansi_term::Color::Red.paint("stderr: "), line);
+                    log_process_error!(
+                        &name_clone_stderr,
+                        "{}{}",
+                        ansi_term::Color::Red.paint("stderr: "),
+                        line
+                    );
                     let mut processes = processes_clone_stderr.lock().unwrap();
                     if let Some(process_info) = processes.get_mut(&name_clone_stderr) {
                         process_info.last_output = Instant::now();
@@ -406,6 +435,8 @@ async fn start_process(
             }
         }
     });
+
+    true
 }
 
 fn process_callback(state: &mut AppState, id: ParameterId) {
@@ -421,8 +452,15 @@ fn process_callback(state: &mut AppState, id: ParameterId) {
             let disabled = resolve_bool_or_string(&service_config.disabled);
 
             if !enable || disabled {
-                log_process_info!(service_name, "Enable ({enable}) is false or disabled {disabled} is true, stopping process");
-                let _ = state.tx.send(ServiceCommand::Stop(service_name.clone()));
+                log_process_info!(
+                    service_name,
+                    "Enable ({enable}) is false or disabled {disabled} is true, stopping process"
+                );
+                let tx = state.tx.clone();
+                let service_name = service_name.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(ServiceCommand::Stop(service_name)).await;
+                });
                 requested_state_change = true;
             } else if service_config.enable_parameter.contains_key(&name) {
                 let expected_value = &service_config.enable_parameter[&name];
@@ -436,19 +474,25 @@ fn process_callback(state: &mut AppState, id: ParameterId) {
                 };
 
                 if should_run {
-                    log_process_info!(service_name, 
+                    log_process_info!(
+                        service_name,
                         "Enable parameter changed, {name} = {value}, starting"
                     );
-                    let _ = state
-                        .tx
-                        .send(ServiceCommand::Start(service_name.clone()));
+                    let tx = state.tx.clone();
+                    let service_name = service_name.clone();
+                    tokio::spawn(async move {
+                        let _ = tx.send(ServiceCommand::Start(service_name)).await;
+                    });
                 } else {
-                    log_process_info!(service_name, 
+                    log_process_info!(
+                        service_name,
                         "Enable parameter changed, {name} = {value}, stopping"
                     );
-                    let _ = state
-                        .tx
-                        .send(ServiceCommand::Stop(service_name.clone()));
+                    let tx = state.tx.clone();
+                    let service_name = service_name.clone();
+                    tokio::spawn(async move {
+                        let _ = tx.send(ServiceCommand::Stop(service_name)).await;
+                    });
                 }
                 requested_state_change = true;
             }
@@ -456,12 +500,15 @@ fn process_callback(state: &mut AppState, id: ParameterId) {
             if !requested_state_change {
                 if let Some(env_config) = &service_config.env {
                     if env_config.values().any(|param_name| param_name == &name) {
-                        log_process_info!(service_name, 
+                        log_process_info!(
+                            service_name,
                             "{name} parameter changed in env, restarting"
                         );
-                        let _ = state
-                            .tx
-                            .send(ServiceCommand::Restart(service_name.clone()));
+                        let tx = state.tx.clone();
+                        let service_name = service_name.clone();
+                        tokio::spawn(async move {
+                            let _ = tx.send(ServiceCommand::Restart(service_name)).await;
+                        });
                     }
                 }
             }
@@ -472,49 +519,77 @@ fn process_callback(state: &mut AppState, id: ParameterId) {
 async fn watchdog_task(
     processes: Arc<Mutex<HashMap<String, ProcessInfo>>>,
     services: HashMap<String, ServiceConfig>,
-    tx: std::sync::mpsc::Sender<ServiceCommand>,
+    tx: mpsc::Sender<ServiceCommand>,
 ) {
+    info!("Creating Watchdog task");
     loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
 
-        let mut processes = processes.lock().unwrap();
-        let now = Instant::now();
+        let mut to_force_restart = Vec::new();
+        let mut to_start = Vec::new();
+        {
+            let mut processes = processes.lock().unwrap();
+            let now = Instant::now();
 
-        for (name, process_info) in processes.iter_mut() {
-            let service = services.get(name).unwrap();
-            if service.one_shot {
-                // No watchdog, no restart for one_shot
-                continue;
-            }
-            if let Some(child) = &mut process_info.child {
-                let needs_restart = match &service.watchdog {
-                    Watchdog::Stdout => {
-                        now.duration_since(process_info.last_output)
-                            > Duration::from_secs(service.watchdog_timeout_s)
+            for (name, process_info) in processes.iter_mut() {
+                let service = services.get(name).unwrap();
+                if service.one_shot {
+                    // No watchdog, no restart for one_shot
+                    continue;
+                }
+                if let Some(child) = &mut process_info.child {
+                    let needs_restart = match &service.watchdog {
+                        Watchdog::Stdout => {
+                            now.duration_since(process_info.last_output)
+                                > Duration::from_secs(service.watchdog_timeout_s)
+                        }
+                        Watchdog::None => false,
+                    };
+
+                    if needs_restart {
+                        log_process_warn!(name, "Watchdog timeout, restarting");
+                        to_force_restart.push(name.clone());
                     }
-                    Watchdog::None => false,
-                };
 
-                if needs_restart {
-                    log_process_warn!(name, "Watchdog timeout, restarting");
-                    let _ = tx.send(ServiceCommand::ForceRestart(name.clone()));
-                }
-
-                let (alive, zombie) = process_management::is_alive(child.id() as i32);
-                if !alive {
-                    log_process_warn!(name, "~~~ Process died ~~~");
-                    process_info.died_at = Some(now);
-                    process_info.child = None;
-                } else if zombie {
-                    log_process_warn!(name, "Process is a zombie (defunct, waiting for parent to reap)");
-                }
-            } else if let Some(died_at) = process_info.died_at {
-                if now.duration_since(died_at) >= Duration::from_secs(5) {
-                    log_process_warn!(name, "Restarting process");
-                    let _ = tx.send(ServiceCommand::Start(name.clone()));
-                    process_info.died_at = None;
+                    let (alive, zombie) = process_management::is_alive(child.id() as i32);
+                    if !alive {
+                        log_process_warn!(name, "~~~ Process died ~~~");
+                        process_info.died_at = Some(now);
+                        process_info.child = None;
+                        to_force_restart.push(name.clone());
+                    } else if zombie {
+                        log_process_warn!(
+                            name,
+                            "Process {} is a zombie (defunct, waiting for parent to reap)",
+                            child.id() as i32
+                        );
+                        process_info.died_at = Some(now);
+                        process_info.child = None;
+                        to_force_restart.push(name.clone());
+                    } else {
+                        // log_process_info!(name, "Alive and well ({})", child.id() as i32);
+                    }
+                } else if let Some(died_at) = process_info.died_at {
+                    if now.duration_since(died_at) >= Duration::from_secs(5) {
+                        log_process_warn!(name, "Restarting process");
+                        to_start.push(name.clone());
+                        process_info.died_at = None;
+                    }
                 }
             }
+        }
+
+        for name in to_force_restart {
+            let tx_clone = tx.clone();
+            tokio::spawn(async move {
+                let _ = tx_clone.send(ServiceCommand::ForceRestart(name)).await;
+            });
+        }
+        for name in to_start {
+            let tx_clone = tx.clone();
+            tokio::spawn(async move {
+                let _ = tx_clone.send(ServiceCommand::Start(name.clone())).await;
+            });
         }
     }
 }
@@ -522,18 +597,23 @@ async fn watchdog_task(
 fn resolve_bool_or_string(val: &BoolOrString) -> bool {
     match val {
         BoolOrString::Bool(b) => *b,
-        BoolOrString::String(env_var) => {
-            match std::env::var(env_var) {
-                Ok(v) => {
-                    info!("Checking env variable {env_var} = {v}");
-                    let v = v.to_ascii_lowercase();
-                    v == "1" || v == "true" || v == "yes" || v == "on" || v == "enabled"
-                }
-                Err(std::env::VarError::NotPresent) => false,
-                Err(_) => false,
+        BoolOrString::String(env_var) => match std::env::var(env_var) {
+            Ok(v) => {
+                info!("Checking env variable {env_var} = {v}");
+                let v = v.to_ascii_lowercase();
+                v == "1" || v == "true" || v == "yes" || v == "on" || v == "enabled"
             }
-        }
+            Err(std::env::VarError::NotPresent) => false,
+            Err(_) => false,
+        },
     }
+}
+
+fn schedule_restart(name: String, tx: mpsc::Sender<ServiceCommand>, delay: Duration) {
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let _ = tx.send(ServiceCommand::ForceRestart(name)).await;
+    });
 }
 
 #[tokio::main]
@@ -601,7 +681,7 @@ async fn main() {
         info!("\tCPU Config {:?}", &service.cpu);
     }
 
-    let (tx, rx) = std::sync::mpsc::channel::<ServiceCommand>();
+    let (tx, mut rx) = mpsc::channel::<ServiceCommand>(32);
 
     interface_instance.start_periodic_update(PERIODIC_UPDATE_INTERVAL);
 
@@ -612,6 +692,7 @@ async fn main() {
         services: services.clone(),
     }));
 
+    info!("Creating Watchdog task");
     tokio::spawn(watchdog_task(
         processes.clone(),
         services.clone(),
@@ -663,7 +744,9 @@ async fn main() {
             if !enable || disabled {
                 should_start = false;
             } else if !service.enable_parameter.is_empty() {
-                if let Some((enable_parameter_name, expected_value)) = service.enable_parameter.iter().next() {
+                if let Some((enable_parameter_name, expected_value)) =
+                    service.enable_parameter.iter().next()
+                {
                     if let Some(id) = app
                         .interface
                         .get_parameter_id_from_name(enable_parameter_name.clone())
@@ -671,23 +754,23 @@ async fn main() {
                         if let Ok(value) = app.interface.get(id, false) {
                             should_start = match app.interface.set_from_json(id, expected_value) {
                                 Ok(val) => {
-                                    log_process_info!(name, 
+                                    log_process_info!(
+                                        name,
                                         "Enable parameter: {enable_parameter_name}, require {val} to start, current value is {value}"
                                     );
                                     val == value
-                                },
+                                }
                                 Err(e) => {
-                                    log_process_error!(name, "Failed to convert enable variable: {e}");
+                                    log_process_error!(
+                                        name,
+                                        "Failed to convert enable variable: {e}"
+                                    );
                                     true
                                 }
                             };
                         }
                     } else {
-                        log_process_error!(
-                            name,
-                            "Parameter {} not found",
-                            enable_parameter_name
-                        );
+                        log_process_error!(name, "Parameter {} not found", enable_parameter_name);
                         should_start = true;
                     }
                 }
@@ -698,7 +781,11 @@ async fn main() {
 
             if should_start {
                 log_process_info!(name, "initial state: started");
-                let _ = app.tx.send(ServiceCommand::Start(name.clone()));
+                let tx = app.tx.clone();
+                let name = name.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(ServiceCommand::Start(name)).await;
+                });
             } else {
                 log_process_info!(name, "initial state: stopped");
             }
@@ -709,17 +796,17 @@ async fn main() {
     {
         let available_colors = [
             ansi_term::Colour::Fixed(141),
-            ansi_term::Colour::Fixed(114), 
-            ansi_term::Colour::Fixed(33), 
+            ansi_term::Colour::Fixed(114),
+            ansi_term::Colour::Fixed(33),
             ansi_term::Colour::Fixed(93),
-            ansi_term::Colour::Fixed(214), 
-            ansi_term::Colour::Fixed(23), 
-            ansi_term::Colour::Fixed(208), 
+            ansi_term::Colour::Fixed(214),
+            ansi_term::Colour::Fixed(23),
+            ansi_term::Colour::Fixed(208),
             ansi_term::Colour::Fixed(129),
-            ansi_term::Colour::Fixed(105), 
-            ansi_term::Colour::Fixed(69), 
+            ansi_term::Colour::Fixed(105),
+            ansi_term::Colour::Fixed(69),
             ansi_term::Colour::Fixed(27),
-            ansi_term::Colour::Fixed(201), 
+            ansi_term::Colour::Fixed(201),
             ansi_term::Colour::Fixed(165),
         ];
 
@@ -734,13 +821,15 @@ async fn main() {
 
     info!("Process Manager started");
 
-    while let Ok(cmd) = rx.recv() {
+    while let Some(cmd) = rx.recv().await {
         match cmd {
             ServiceCommand::Start(name) => {
                 log_process_info!(&name, "Start requested, starting...");
                 if let Some(service_config) = services.get(&name) {
                     let interface = &state.lock().unwrap().interface;
-                    start_process(
+                    let tx_clone = tx.clone();
+                    let name_clone = name.clone();
+                    let success = start_process(
                         processes.clone(),
                         name,
                         service_config,
@@ -749,6 +838,9 @@ async fn main() {
                         false,
                     )
                     .await;
+                    if !success {
+                        schedule_restart(name_clone, tx_clone, Duration::from_secs(5));
+                    }
                 }
             }
             ServiceCommand::Stop(name) => {
@@ -760,12 +852,17 @@ async fn main() {
             ServiceCommand::Restart(name) => {
                 if let Some(service_config) = services.get(&name) {
                     if service_config.one_shot {
-                        log_process_info!(&name, "Restart requested, but one_shot is true. Ignoring.");
+                        log_process_info!(
+                            &name,
+                            "Restart requested, but one_shot is true. Ignoring."
+                        );
                         continue;
                     }
                     log_process_info!(&name, "Restart received, restarting...");
                     let interface = &state.lock().unwrap().interface;
-                    start_process(
+                    let tx_clone = tx.clone();
+                    let name_clone = name.clone();
+                    let success = start_process(
                         processes.clone(),
                         name,
                         service_config,
@@ -774,17 +871,25 @@ async fn main() {
                         true,
                     )
                     .await;
+                    if !success {
+                        schedule_restart(name_clone, tx_clone, Duration::from_secs(5));
+                    }
                 }
             }
             ServiceCommand::ForceRestart(name) => {
                 if let Some(service_config) = services.get(&name) {
                     if service_config.one_shot {
-                        log_process_info!(&name, "ForceRestart requested, but one_shot is true. Ignoring.");
+                        log_process_info!(
+                            &name,
+                            "ForceRestart requested, but one_shot is true. Ignoring."
+                        );
                         continue;
                     }
                     log_process_info!(&name, "ForceRestart received, restarting...");
                     let interface = &state.lock().unwrap().interface;
-                    start_process(
+                    let tx_clone = tx.clone();
+                    let name_clone = name.clone();
+                    let success = start_process(
                         processes.clone(),
                         name,
                         service_config,
@@ -793,6 +898,9 @@ async fn main() {
                         true,
                     )
                     .await;
+                    if !success {
+                        schedule_restart(name_clone, tx_clone, Duration::from_secs(5));
+                    }
                 }
             }
         }

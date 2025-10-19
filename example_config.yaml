@@ -11,11 +11,14 @@ services:
       WIDTH: "image_acquisition@image_width"
       HEIGHT: "image_acquisition@image_height"
       FPS: "image_acquisition@frame_rate"
-    command: "./simulator --width=$WIDTH --height=$HEIGHT --config=$CONFIG"
+    command: "./test_app_a.sh --width=$WIDTH --height=$HEIGHT --config=$CONFIG"
     log_dir: "/tmp/pipeline_imgen"
+    workdir: "example"
     watchdog: "stdout"
     watchdog_timeout_s: 180
 
   processor:
-    command: "./processor"
-    enable: false
+    command: "./test_app_b.sh"
+    log_dir: "/tmp/pipeline_b"
+    workdir: "example"
+    # enable: false

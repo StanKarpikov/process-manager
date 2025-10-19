@@ -24,7 +24,9 @@ pub fn is_alive(pid: i32) -> (bool, bool) {
         // Check if zombie by reading /proc/<pid>/stat
         let stat_path = format!("/proc/{}/stat", pid);
         if let Ok(stat) = std::fs::read_to_string(stat_path) {
+            // info!("stat: {:?}", stat);
             let fields: Vec<&str> = stat.split_whitespace().collect();
+            // info!("fields: {:?}", fields);
             if fields.len() > 2 && fields[2] == "Z" {
                 zombie = true;
             }
