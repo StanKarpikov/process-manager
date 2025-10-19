@@ -648,7 +648,7 @@ fn schedule_restart(name: String, tx: mpsc::Sender<ServiceCommand>, delay: Durat
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
-    console_subscriber::init();
+    // console_subscriber::init();
     // Initialize a start time for relative timestamps
     let start_time = std::time::Instant::now();
 
