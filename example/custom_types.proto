@@ -1,6 +1,0 @@
-syntax = "proto3";
-package custom_types;
-
-message CustomType {
-    
-}

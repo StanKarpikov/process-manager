@@ -1,3 +1,3 @@
 # Process Manager
 
-Simple Process Manager controlled via Econfmanager.
+Simple Process Manager.

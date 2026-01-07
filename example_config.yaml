@@ -1,16 +1,5 @@
-econfmanager:
-  default_data_folder: "default_data/"
-  database_path: "parameters.db"
-  saved_database_path: "saved_parameters.db"
-
 services:
   simulator:
-    enable_parameter:
-      "image_acquisition@source": 0
-    env:
-      WIDTH: "image_acquisition@image_width"
-      HEIGHT: "image_acquisition@image_height"
-      FPS: "image_acquisition@frame_rate"
     command: "./test_app_a.sh --width=$WIDTH --height=$HEIGHT --config=$CONFIG"
     log_dir: "/tmp/pipeline_imgen"
     workdir: "example"
