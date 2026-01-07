@@ -3,9 +3,6 @@ use ansi_term::Style;
 use arguments::Args;
 use clap::Parser;
 use configfile::{BoolOrString, Config, CpuSelection, ServiceConfig, Watchdog};
-use econfmanager::generated::ParameterId;
-use econfmanager::interface::InterfaceInstance;
-use econfmanager::interface::ParameterUpdateCallback;
 use env_logger::Env;
 use log::{error, info, warn};
 use std::collections::HashMap;
@@ -93,7 +90,6 @@ struct ProcessInfo {
 }
 
 struct AppState {
-    interface: InterfaceInstance,
     tx: mpsc::Sender<ServiceCommand>,
     services: HashMap<String, ServiceConfig>,
 }
@@ -278,34 +274,15 @@ async fn stop_process(
 fn build_env_vars(
     name: &str,
     service_config: &ServiceConfig,
-    interface: &InterfaceInstance,
 ) -> HashMap<String, String> {
     let mut env_vars = std::env::vars().collect::<HashMap<_, _>>();
     if let Some(env_config) = &service_config.env {
         for (env_var, env_value) in env_config {
-            if let Some(param_id) = interface.get_parameter_id_from_name(env_value.clone()) {
-                if let Ok(value) = interface.get(param_id, false) {
-                    let value_str = InterfaceInstance::value_to_string(&value);
-                    log_process_info!(
-                        name.to_string(),
-                        "Adding env value {env_var} = {value_str} (from parameter {})",
-                        env_value
-                    );
-                    env_vars.insert(env_var.clone(), value_str);
-                } else {
-                    log_process_info!(
-                        name.to_string(),
-                        "Adding env value {env_var} = {env_value} (literal)"
-                    );
-                    env_vars.insert(env_var.clone(), env_value.clone());
-                }
-            } else {
-                log_process_info!(
-                    name.to_string(),
-                    "Adding env value {env_var} = {env_value} (literal)"
-                );
-                env_vars.insert(env_var.clone(), env_value.clone());
-            }
+            log_process_info!(
+                name.to_string(),
+                "Adding env value {env_var} = {env_value} (literal)"
+            );
+            env_vars.insert(env_var.clone(), env_value.clone());
         }
     }
     env_vars.insert("PROCESS_MANAGER_UUID".to_string(), name.to_string());
@@ -316,11 +293,10 @@ async fn start_process(
     processes: Arc<Mutex<HashMap<String, ProcessInfo>>>,
     name: String,
     service_config: &ServiceConfig,
-    interface: &InterfaceInstance,
     only_if_env_changed: bool,
     restart: bool,
 ) -> bool {
-    let env_vars = build_env_vars(&name, service_config, interface);
+    let env_vars = build_env_vars(&name, service_config);
 
     // Check if already running
     {
@@ -487,82 +463,6 @@ async fn start_process(
     true
 }
 
-async fn process_callback(state: &mut AppState, id: ParameterId) {
-    let name = state.interface.get_name(id);
-    info!("Received update for parameter: {}", name);
-
-    if let Ok(value) = state.interface.get(id, false) {
-        for (service_name, service_config) in &state.services {
-            let mut requested_state_change = false;
-
-            // If enable is false, always stop the process and skip enable_parameter logic
-            let enable = resolve_bool_or_string(&service_config.enable);
-            let disabled = resolve_bool_or_string(&service_config.disabled);
-
-            if !enable || disabled {
-                log_process_info!(
-                    service_name,
-                    "Enable ({enable}) is false or disabled {disabled} is true, stopping process"
-                );
-                let tx = state.tx.clone();
-                let service_name = service_name.clone();
-                tokio::spawn(async move {
-                    let _ = tx.send(ServiceCommand::Stop(service_name)).await;
-                });
-                requested_state_change = true;
-            } else if service_config.enable_parameter.contains_key(&name) {
-                let expected_value = &service_config.enable_parameter[&name];
-
-                let should_run = match state.interface.set_from_json(id, expected_value) {
-                    Ok(val) => val == value,
-                    Err(e) => {
-                        error!("Failed to convert enable variable: {e}");
-                        true
-                    }
-                };
-
-                if should_run {
-                    log_process_info!(
-                        service_name,
-                        "Enable parameter changed, {name} = {value}, starting"
-                    );
-                    let tx = state.tx.clone();
-                    let service_name = service_name.clone();
-                    tokio::spawn(async move {
-                        let _ = tx.send(ServiceCommand::Start(service_name)).await;
-                    });
-                } else {
-                    log_process_info!(
-                        service_name,
-                        "Enable parameter changed, {name} = {value}, stopping"
-                    );
-                    let tx = state.tx.clone();
-                    let service_name = service_name.clone();
-                    tokio::spawn(async move {
-                        let _ = tx.send(ServiceCommand::Stop(service_name)).await;
-                    });
-                }
-                requested_state_change = true;
-            }
-
-            if !requested_state_change {
-                if let Some(env_config) = &service_config.env {
-                    if env_config.values().any(|param_name| param_name == &name) {
-                        log_process_info!(
-                            service_name,
-                            "{name} parameter changed in env, restarting"
-                        );
-                        let tx = state.tx.clone();
-                        let service_name = service_name.clone();
-                        tokio::spawn(async move {
-                            let _ = tx.send(ServiceCommand::Restart(service_name)).await;
-                        });
-                    }
-                }
-            }
-        }
-    }
-}
 
 async fn watchdog_task(
     processes: Arc<Mutex<HashMap<String, ProcessInfo>>>,
@@ -715,18 +615,6 @@ async fn main() {
     let config = Config::from_file(args.config);
     let services = config.services;
 
-    let mut interface_instance = match InterfaceInstance::new(
-        &config.econfmanager.database_path,
-        &config.econfmanager.saved_database_path,
-        &config.econfmanager.default_data_folder,
-    ) {
-        Ok(instance) => instance,
-        Err(e) => {
-            error!("Failed to create interface instance: {}", e);
-            return;
-        }
-    };
-
     for (name, service) in &services {
         log_process_info!(name, "Service: ");
         info!("\tCommand {}", &service.command);
@@ -741,11 +629,8 @@ async fn main() {
 
     let (tx, mut rx) = mpsc::channel::<ServiceCommand>(32);
 
-    interface_instance.start_periodic_update(PERIODIC_UPDATE_INTERVAL);
-
     let processes = Arc::new(Mutex::new(HashMap::new()));
     let state = Arc::new(Mutex::new(AppState {
-        interface: interface_instance,
         tx: tx.clone(),
         services: services.clone(),
     }));
@@ -757,115 +642,31 @@ async fn main() {
         tx.clone(),
     ));
 
-    // Create a channel for parameter update events
-    let (param_tx, mut param_rx) = tokio::sync::mpsc::unbounded_channel::<ParameterId>();
-
-    let _state_cloned = Arc::clone(&state);
-    let callback = Arc::new(move |id: ParameterId| {
-        // Instead of spawning a Tokio task here (which may panic if not in a Tokio runtime),
-        // send the event to the Tokio runtime via the channel.
-        let _ = param_tx.send(id);
-    }) as ParameterUpdateCallback;
-
-    // NOTE: This block must be made async to use tokio::Mutex
+    // Initial check, start the processes
     {
         let state = Arc::clone(&state);
-        let callback = callback.clone();
         tokio::spawn(async move {
             let mut app = state.lock().await;
 
-            let mut params_to_watch = Vec::new();
-
-            for service in app.services.values() {
-                for param_name in service.enable_parameter.keys() {
-                    params_to_watch.push(param_name.clone());
-                }
-
-                if let Some(env_config) = &service.env {
-                    for param_name in env_config.values() {
-                        params_to_watch.push(param_name.clone());
-                    }
-                }
-            }
-
-            for param_name in params_to_watch {
-                if let Some(id) = app.interface.get_parameter_id_from_name(param_name.clone()) {
-                    if let Err(e) = app.interface.add_callback(id, callback.clone()) {
-                        log_process_error!(param_name, "Failed to add callback: {}", e);
-                    }
-                } else {
-                    log_process_error!(param_name, "Parameter not found");
-                }
-            }
-
-            // Initial check, start the processes
             for (name, service) in &app.services {
-                let mut should_start = false;
                 let enable = resolve_bool_or_string(&service.enable);
                 let disabled = resolve_bool_or_string(&service.disabled);
                 log_process_info!(name, "Enabled - {:?}: {}", service.enable, enable);
                 log_process_info!(name, "Disabled - {:?}: {}", service.disabled, disabled);
 
                 if !enable || disabled {
-                    should_start = false;
-                } else if !service.enable_parameter.is_empty() {
-                    if let Some((enable_parameter_name, expected_value)) =
-                        service.enable_parameter.iter().next()
-                    {
-                        if let Some(id) = app
-                            .interface
-                            .get_parameter_id_from_name(enable_parameter_name.clone())
-                        {
-                            if let Ok(value) = app.interface.get(id, false) {
-                                should_start = match app.interface.set_from_json(id, expected_value) {
-                                    Ok(val) => {
-                                        log_process_info!(
-                                            name,
-                                            "Enable parameter: {enable_parameter_name}, require {val} to start, current value is {value}"
-                                        );
-                                        val == value
-                                    }
-                                    Err(e) => {
-                                        log_process_error!(
-                                            name,
-                                            "Failed to convert enable variable: {e}"
-                                        );
-                                        true
-                                    }
-                                };
-                            }
-                        } else {
-                            log_process_error!(name, "Parameter {} not found", enable_parameter_name);
-                            should_start = true;
-                        }
-                    }
+                    log_process_info!(name, "initial state: stopped");
                 } else {
-                    log_process_info!(name, "No enable_parameter set, using enable: true");
-                    should_start = true;
-                }
-
-                if should_start {
                     log_process_info!(name, "initial state: started");
                     let tx = app.tx.clone();
                     let name = name.clone();
                     tokio::spawn(async move {
                         let _ = tx.send(ServiceCommand::Start(name)).await;
                     });
-                } else {
-                    log_process_info!(name, "initial state: stopped");
                 }
             }
         });
     }
-
-    // Spawn a Tokio task to handle parameter update events in the Tokio runtime
-    let state_for_param = Arc::clone(&state);
-    tokio::spawn(async move {
-        while let Some(id) = param_rx.recv().await {
-            let mut app = state_for_param.lock().await;
-            process_callback(&mut app, id).await;
-        }
-    });
 
     // Initialize process colors
     {
@@ -901,14 +702,12 @@ async fn main() {
             ServiceCommand::Start(name) => {
                 log_process_info!(&name, "Start requested, starting...");
                 if let Some(service_config) = services.get(&name) {
-                    let interface = &state.lock().await.interface;
                     let tx_clone = tx.clone();
                     let name_clone = name.clone();
                     let success = start_process(
                         processes.clone(),
                         name,
                         service_config,
-                        interface,
                         false,
                         false,
                     )
@@ -934,14 +733,12 @@ async fn main() {
                         continue;
                     }
                     log_process_info!(&name, "Restart received, restarting...");
-                    let interface = &state.lock().await.interface;
                     let tx_clone = tx.clone();
                     let name_clone = name.clone();
                     let success = start_process(
                         processes.clone(),
                         name,
                         service_config,
-                        interface,
                         true,
                         true,
                     )
@@ -961,14 +758,12 @@ async fn main() {
                         continue;
                     }
                     log_process_info!(&name, "ForceRestart received, restarting...");
-                    let interface = &state.lock().await.interface;
                     let tx_clone = tx.clone();
                     let name_clone = name.clone();
                     let success = start_process(
                         processes.clone(),
                         name,
                         service_config,
-                        interface,
                         false,
                         true,
                     )
