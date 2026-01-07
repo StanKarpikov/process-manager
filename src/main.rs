@@ -188,7 +188,34 @@ async fn run_command(
     // Apply CPU affinity if specified
     if let Some(cpu_selection) = cpu {
         let affinity_mask = create_cpu_affinity_mask(cpu_selection);
-        shell_command = format!("taskset -c {} {}", affinity_mask, shell_command);
+
+        // Check if we're running in Busybox environment
+        // Busybox taskset uses a different syntax: taskset <hex_mask> <command>
+        // Standard taskset uses: taskset -c <cpu_list> <command>
+
+        // We'll check for Busybox by looking for the BUSYBOX environment variable
+        // or by checking if /bin/busybox exists
+        let use_busybox_syntax = std::env::var("BUSYBOX").is_ok() ||
+                                 std::path::Path::new("/bin/busybox").exists();
+
+        if use_busybox_syntax {
+            // Convert CPU numbers to a hexadecimal bitmask
+            // For example, CPU 0,1,2 would be 0x7 (binary 111)
+            let mask = match cpu_selection {
+                CpuSelection::Single(cpu) => 1 << cpu,
+                CpuSelection::Multiple(cpus) => {
+                    let mut mask = 0;
+                    for cpu in cpus {
+                        mask |= 1 << cpu;
+                    }
+                    mask
+                }
+            };
+            shell_command = format!("taskset {}x {}", mask, shell_command);
+        } else {
+            // Standard taskset syntax
+            shell_command = format!("taskset -c {} {}", affinity_mask, shell_command);
+        }
     }
 
     // Add logging pipe
