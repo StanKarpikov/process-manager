@@ -15,7 +15,7 @@ chrono = "0.4.41"
 sysinfo = "0.29"
 env_logger = { version = "0.11.8" }
 clap = { version = "4.4", features = ["derive", "cargo"] }
-econfmanager = { git = "https://github.com/StanKarpikov/econfmanager.git", branch = "feature/yaml-config" }
+econfmanager = { git = "https://github.com/StanKarpikov/econfmanager.git", branch = "main" }
 serde_yaml = "0.9.34"
 num_cpus = "1.17.0"
 console-subscriber = "0.4.1"
