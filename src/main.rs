@@ -207,7 +207,7 @@ async fn run_command(
                     mask
                 }
             };
-            shell_command = format!("taskset {}x {}", mask, shell_command);
+            shell_command = format!("taskset {} {}", mask, shell_command);
         } else {
             // Standard taskset syntax
             shell_command = format!("taskset -c {} {}", affinity_mask, shell_command);
