@@ -88,18 +88,7 @@ fn default_disabled_bool() -> BoolOrString {
 }
 
 #[derive(Deserialize, Default)]
-pub(crate) struct EconfmanagerConfig {
-    #[serde(default = "default_database_path")]
-    pub database_path: String,
-    #[serde(default = "default_saved_database_path")]
-    pub saved_database_path: String,
-    #[serde(default = "default_default_data_folder")]
-    pub default_data_folder: String,
-}
-
-#[derive(Deserialize, Default)]
 pub(crate) struct Config {
-    pub(crate) econfmanager: EconfmanagerConfig,
     pub(crate) services: HashMap<String, ServiceConfig>,
 }
 
@@ -152,7 +141,17 @@ fn default_default_data_folder() -> String {
             let file_content = fs::read_to_string(std::path::Path::new(&config_file))
                 .unwrap_or_else(|_| panic!("Failed to read configuration file {}", config_file));
 
-            let yaml_config: Config = serde_yaml::from_str(&file_content)
+            let expand = |content: &str| -> Result<String, Box<dyn std::error::Error>> {
+                let expanded = shellexpand::env(content)
+                    .map_err(|e| format!("Failed to expand environment variables: {}", e))?
+                    .to_string();
+                Ok(expanded)
+            };
+
+            let expanded_content = expand(&file_content)
+                .expect("Failed to expand environment variables in configuration");
+
+            let yaml_config: Config = serde_yaml::from_str(&expanded_content)
                 .expect("Failed to parse YAML configuration");
 
             yaml_config
